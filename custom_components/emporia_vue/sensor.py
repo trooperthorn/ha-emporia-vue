@@ -131,7 +131,6 @@ async def async_setup_entry(
             )
 
     # 1. ADD PER-CHANNEL SENSORS FOR ALL THREE SCALES
-    # 1. ADD PER-CHANNEL SENSORS FOR ALL THREE SCALES
     
     # --- FIX 1: Prime coordinator data with virtual API channels (TotalUsage, Balance) ---
     for gid, device in device_information.items():
@@ -194,20 +193,6 @@ async def async_setup_entry(
     async_add_entities(all_entities)
 
     # 4. CLEAN UP / DISABLE DEVICES WITH ZERO ACTIVE ENTITIES
-    # Built from each entity's own device_info property, which every HA
-    # entity has regardless of whether the subclass sets _attr_device_info
-    # or overrides the property directly. This works uniformly across
-    # every entity class in this file, including devices that only ever
-    # get a plain CurrentVuePowerSensor (e.g. single-CT solar monitors).
-    #
-    # Known limitation: this only sees entities created in THIS platform's
-    # async_setup_entry. A device populated entirely by switch.py/number.py
-    # (e.g. a smart outlet with no EV charger, which never appears in
-    # sensor.py at all) will still be misjudged as inactive here. Fixing
-    # that properly means moving this pass to __init__.py, run once after
-    # all platforms have finished forwarding entry setup, and building the
-    # active set from the entity registry directly instead of one
-    # platform's local list.
     active_identifiers: set[tuple[str, str]] = set()
     for entity in all_entities:
         info = entity.device_info
@@ -220,8 +205,6 @@ async def async_setup_entry(
         is_active = any(ident in active_identifiers for ident in dev_entry.identifiers)
 
         if is_active:
-            # Re-enable a device we previously auto-disabled, now that it
-            # has active entities again (e.g. a channel reappeared).
             if dev_entry.disabled_by == dr.DeviceEntryDisabler.INTEGRATION:
                 device_registry.async_update_device(dev_entry.id, disabled_by=None)
         elif dev_entry.disabled_by is None:
@@ -243,9 +226,6 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
         channel_num: str = coordinator.data[identifier]["channel_num"]
         self._device: VueDevice = coordinator.data[identifier]["info"]
 
-        # Enabled by default only if this scale/channel is supposed to be on
-        # (force_enabled, always True for Mains channels regardless of the
-        # user's Minute/Day/Month option) AND we actually have usage data.
         initial_usage = coordinator.data[identifier].get("usage")
         self._attr_entity_registry_enabled_default = (
             force_enabled and initial_usage is not None
@@ -257,14 +237,14 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
                 if channel.channel_num == channel_num:
                     final_channel = channel
                     break
-                    
+
         # --- FIX 3: Generate mock physical channels for Emporia's virtual metrics ---
         if final_channel is None and channel_num in ["TotalUsage", "Balance"]:
             final_channel = VueDeviceChannel()
-            final_channel.channel_num = channel_num
-            final_channel.name = "Total Usage" if channel_num == "TotalUsage" else "API Balance"
-            final_channel.channel_multiplier = 1.0
             final_channel.device_gid = device_gid
+            final_channel.channel_num = channel_num
+            final_channel.channel_multiplier = 1.0
+            final_channel.name = "Total Usage" if channel_num == "TotalUsage" else "API Balance"
         # ----------------------------------------------------------------------------
 
         if final_channel is None:
@@ -276,7 +256,7 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
             raise RuntimeError(
                 f"No channel found for device_gid {device_gid} and channel_num {channel_num}"
             )
-            )
+            
         self._channel: VueDeviceChannel = final_channel
         self._iskwh = self.scale_is_energy()
 
@@ -310,9 +290,6 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
     def device_info(self) -> DeviceInfo:
         """Return the device info."""
         if self._channel.channel_num in MAINS_CHANNEL_NUMS:
-            # Group Mains/aggregate channels with the parent monitor device,
-            # alongside the Balance/Grid Import/Export sensors, instead of
-            # creating a separate per-channel device for them.
             return DeviceInfo(
                 identifiers={(DOMAIN, str(self._device.device_gid))},
                 name=self._device.device_name or f"Emporia Vue {self._device.device_gid}",
@@ -342,7 +319,7 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
     def native_value(self) -> float | None:
         """Return the state of the sensor."""
         if self._id in self.coordinator.data:
-            usage = self.coordinator.data[self._id]["usage"]
+            usage = self.coordinator.data[self._id].get("usage")
             return self.scale_usage(usage) if usage is not None else None
         return None
 
@@ -486,8 +463,6 @@ class VueBalanceSensor(CoordinatorEntity, SensorEntity):
         self._scale = scale
         self._device_gid = device.device_gid
 
-        # Solar channel_nums for this device, precomputed so native_value
-        # doesn't need to re-scan device.channels on every update.
         self._solar_channel_nums = {
             ch.channel_num
             for ch in (device.channels or [])
@@ -521,20 +496,7 @@ class VueBalanceSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self) -> float | None:
-        """Calculate the balance dynamically from the coordinator data.
-
-        Mains CTs sit upstream of the solar interconnection point, so the
-        Mains reading already reflects (House Consumption - Solar
-        Production) — it goes negative when solar exports more than the
-        house is using. If solar's channel were folded into branch_usage
-        like a normal consumption circuit, its production would be
-        subtracted a second time here, driving Balance sharply negative
-        (and thus to the 0.0 floor) any time solar output is significant.
-        So solar is tracked separately and added back rather than treated
-        as a consumption branch:
-
-            Balance = (Mains + Solar Production) - sum(other branches)
-        """
+        """Calculate the balance dynamically from the coordinator data."""
         if not self.coordinator.data:
             return None
 
@@ -547,7 +509,6 @@ class VueBalanceSensor(CoordinatorEntity, SensorEntity):
                 continue
             channel_num = str(data.get("channel_num"))
             if channel_num in MAINS_SPLIT_CHANNELS:
-                # Derived Import/Export entries — not part of this calculation.
                 continue
 
             usage = data.get("usage")
@@ -562,10 +523,6 @@ class VueBalanceSensor(CoordinatorEntity, SensorEntity):
                 branch_usage += usage
 
         balance = (mains_usage + solar_usage) - branch_usage
-
-        # Due to slight analog inaccuracies in CT clamps, the sum of branches
-        # can occasionally exceed Mains+Solar by a tiny fraction. The Emporia
-        # app floors this at 0, so we do the same to prevent UI artifacts.
         return max(balance, 0.0)
 
     @property
@@ -595,21 +552,7 @@ class VueBalanceSensor(CoordinatorEntity, SensorEntity):
 
 
 class VueMainsSplitSensor(CoordinatorEntity, SensorEntity):
-    """Representation of the derived Grid Import or Export sensor.
-
-    Reads a pre-computed value from coordinator data (see
-    add_minute_mains_split / integrate_mains_split in __init__.py), derived
-    from the sign of the combined Mains channel at MINUTE resolution. This
-    correctly handles solar export: when solar production exceeds house
-    load, the Mains CT reads negative for that minute, and that minute's
-    magnitude is accumulated into Export rather than Import.
-
-    Only instantiated where the device/scale combination lacks Emporia's
-    own native MainsFromGrid/MainsToGrid channels (see
-    _coordinator_has_native_mains_split in async_setup_entry) — where those
-    exist, they're a more authoritative source and are surfaced instead via
-    the ordinary CurrentVuePowerSensor path.
-    """
+    """Representation of the derived Grid Import or Export sensor."""
 
     def __init__(self, coordinator, device: VueDevice, scale: str, direction: str) -> None:
         """Initialize the split mains sensor."""
@@ -689,9 +632,6 @@ class EmporiaEVChargeTimeNeededSensor(SensorEntity):
 
         self._attr_unique_id = f"emporia_vue_ev_charge_time_needed_{self._device_gid}"
 
-        # Matches the device identifier used by EmporiaChargerEntity
-        # (switch.py / number.py) so this sensor groups with the charger's
-        # switch/status/current-limit entities instead of a separate device.
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"{self._device_gid}-1,2,3")},
             name=self._charger_device.device_name or f"Emporia Vue {self._device_gid}",
