@@ -564,7 +564,7 @@ class EmporiaEVChargeTimeNeededSensor(SensorEntity):
         self._attr_unique_id = f"emporia_vue_ev_charge_time_needed_{self._device_gid}"
         
         self._attr_device_info = DeviceInfo(
-            identifiers={("emporia_vue", str(self._device_gid))},
+            identifiers={(DOMAIN, f"{self._device_gid}-1,2,3")},
             name=self._charger_device.device_name or f"Emporia Vue {self._device_gid}",
             manufacturer="Emporia",
             model=self._charger_device.model,
