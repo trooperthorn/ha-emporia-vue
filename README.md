@@ -2,11 +2,13 @@
 
 # MODIFIED for Full Home Assistant Energy support. Coding optimization via GEMINI Pro.
 Changes:
+- EV Charging Slider. It works you can watch it change in the app.
+- EV Automation Blueprints!!!
 - Properly formatted for Energy Category
 - Properly added Balance for overage of non-sensors
 - Restart registered all sensors
 - aSync calls to pyVue
-- 12am does not give you a total of yesterday, super annoying with Solar.
+- 12am does not give you a total of yesterday, blame Solar and HA. HA doesnt want negative values.
 - EV is more usable. Dynamic Solar Charging Automation; I want to be able to set the Amp values. My electric monthly bill is less than a McDonalds meal for 2.
   
 
