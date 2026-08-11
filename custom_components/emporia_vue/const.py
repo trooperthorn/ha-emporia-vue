@@ -20,10 +20,24 @@ ENABLE_1MON = "enable_1mon"
 SOLAR_INVERT = "solar_invert"
 CUSTOMER_GID = "customer_gid"
 CONFIG_TITLE = "title"
+
 # Channel numbers that represent the physical Mains/Grid CTs on a Vue unit,
-# rather than a monitored branch circuit. These sensors must always be
-# created and always default-enabled regardless of ENABLE_1M/1D/1MON.
-MAINS_CHANNEL_NUMS = frozenset({"1", "2", "3", "1,2,3", "Balance", "MainsFromGrid", "MainsToGrid"})
+# rather than a monitored branch circuit. Per-channel sensors for these are
+# always created and always default-enabled regardless of ENABLE_1M/1D/1MON.
+MAINS_CHANNEL_NUMS = frozenset(
+    {"1", "2", "3", "1,2,3", "Balance", "MainsFromGrid", "MainsToGrid"}
+)
+
+# The single combined 3-phase mains channel used to derive the Grid
+# Import/Export split (see VueMainsSplitSensor in sensor.py).
+MAINS_COMBINED_CHANNEL_NUM = "1,2,3"
+
+# Synthetic channel_num labels used internally for the derived Import/Export
+# entries injected into coordinator data. These are not real Emporia channels
+# and must be excluded from the generic per-channel sensor loop in sensor.py.
+MAINS_SPLIT_CHANNEL_IMPORT = "MainsImport"
+MAINS_SPLIT_CHANNEL_EXPORT = "MainsExport"
+MAINS_SPLIT_CHANNELS = frozenset({MAINS_SPLIT_CHANNEL_IMPORT, MAINS_SPLIT_CHANNEL_EXPORT})
 
 AUTH_METHOD_SCHEMA = vol.Schema(
     {
