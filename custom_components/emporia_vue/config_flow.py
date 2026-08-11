@@ -1,5 +1,5 @@
 """Config flow for Emporia Vue integration."""
-
+import requests
 import asyncio
 from collections.abc import Mapping
 from functools import partial
@@ -62,40 +62,40 @@ class VueHub:
         self.vue = PyEmVue()
 
     async def authenticate(self, data: dict[str, Any] | Mapping[str, Any]) -> bool:
-        """Test if we can authenticate with the host."""
-        auth_method = data.get(AUTH_METHOD, AUTH_METHOD_EMAIL_PASSWORD)
-        
-        try:
-            if auth_method == AUTH_METHOD_TOKENS:
-                return await self.hass.async_add_executor_job(
-                    partial(
-                        self.vue.login,
-                        id_token=data[CONF_ID_TOKEN],
-                        access_token=data[CONF_ACCESS_TOKEN],
-                        refresh_token=data[CONF_REFRESH_TOKEN],
-                    )
-                )
+    """Test if we can authenticate with the host."""
+    auth_method = data.get(AUTH_METHOD, AUTH_METHOD_EMAIL_PASSWORD)
 
-            username = data[CONF_EMAIL]
-            password = data[CONF_PASSWORD]
-            
-            # support using the simulator by looking at the username
-            # if formatted like vue_simulator@localhost:8000 then use the simulator
-            if username.startswith("vue_simulator@"):
-                host = username.split("@")[1]
-                return await self.hass.async_add_executor_job(
-                    self.vue.login_simulator, host
-                )
-                
+    try:
+        if auth_method == AUTH_METHOD_TOKENS:
             return await self.hass.async_add_executor_job(
-                self.vue.login, username, password
+                partial(
+                    self.vue.login,
+                    id_token=data[CONF_ID_TOKEN],
+                    access_token=data[CONF_ACCESS_TOKEN],
+                    refresh_token=data[CONF_REFRESH_TOKEN],
+                )
             )
-            
-        except Exception as err:
-            # Catch network timeouts, bad passwords, or 401 Unauthorized errors
-            # and log them cleanly instead of crashing the Config Flow UI.
-            _LOGGER.debug("Emporia Vue authentication failed: %s", err)
-            return False
+
+        username = data[CONF_EMAIL]
+        password = data[CONF_PASSWORD]
+
+        if username.startswith("vue_simulator@"):
+            host = username.split("@")[1]
+            return await self.hass.async_add_executor_job(
+                self.vue.login_simulator, host
+            )
+
+        return await self.hass.async_add_executor_job(
+            self.vue.login, username, password
+        )
+
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as err:
+        _LOGGER.warning("Could not reach Emporia servers: %s", err)
+        raise CannotConnect from err
+    except Exception as err:  # pylint: disable=broad-except
+        # Genuine auth rejection (bad password, invalid token, etc.)
+        _LOGGER.debug("Emporia Vue authentication failed: %s", err)
+        return False
 
 
 async def validate_input(
@@ -105,11 +105,6 @@ async def validate_input(
 
     Data has the keys from DATA_SCHEMA with values provided by the user.
     """
-    # --- LAZY IMPORTS ---
-    # Moved inside the function to prevent loading during HA startup
-    import pyemvue
-    from pyemvue import PyEmVue
-    # --------------------
 
     hub = VueHub(hass)
     if not await hub.authenticate(data):
