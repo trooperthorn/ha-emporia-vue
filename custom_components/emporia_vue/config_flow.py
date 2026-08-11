@@ -5,12 +5,11 @@ from collections.abc import Mapping
 from functools import partial
 import logging
 from typing import Any
-from collections.abc import Mapping
-
 
 import voluptuous as vol
 
 from homeassistant import config_entries, exceptions
+from homeassistant.core import HomeAssistant
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 import homeassistant.helpers.config_validation as cv
 
@@ -96,6 +95,7 @@ class VueHub:
             # and log them cleanly instead of crashing the Config Flow UI.
             _LOGGER.debug("Emporia Vue authentication failed: %s", err)
             return False
+
 
 async def validate_input(
     hass: HomeAssistant, data: dict | Mapping[str, Any]
@@ -258,7 +258,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CUSTOMER_GID not in current_config.data
                 or not current_config.data[CUSTOMER_GID]
             ):
-                info = await validate_input(current_config.data)
+                info = await validate_input(self.hass, current_config.data)
 
             await self.async_set_unique_id(info[CUSTOMER_GID])
             self._abort_if_unique_id_mismatch(reason="wrong_account")
@@ -317,7 +317,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 reauth_data = dict(existing_entry.data)
                 reauth_data.update(user_input)
                 reauth_data[AUTH_METHOD] = auth_method
-                info = await validate_input(reauth_data)
+                info = await validate_input(self.hass, reauth_data)
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
             else:
