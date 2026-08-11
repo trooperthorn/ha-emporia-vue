@@ -374,14 +374,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class EmporiaVueOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options for Emporia Vue."""
 
-    def async_step_init(
+    async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Manage the options."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        options = self.config_entry.options  # Built-in property works automatically
+        options = self.config_entry.options
 
         options_schema = vol.Schema(
             {
