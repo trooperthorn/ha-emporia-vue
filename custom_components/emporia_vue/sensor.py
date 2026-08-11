@@ -82,6 +82,15 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
         device_gid: int = coordinator.data[identifier]["device_gid"]
         channel_num: str = coordinator.data[identifier]["channel_num"]
         self._device: VueDevice = coordinator.data[identifier]["info"]
+        
+        # --- ADDED: Disable entity by default if no usage data is returned ---
+        initial_usage = coordinator.data[identifier].get("usage")
+        if initial_usage is None:
+            self._attr_entity_registry_enabled_default = False
+        else:
+            self._attr_entity_registry_enabled_default = True
+        # ---------------------------------------------------------------------
+
         final_channel: VueDeviceChannel | None = None
         if self._device is not None:
             for channel in self._device.channels:
