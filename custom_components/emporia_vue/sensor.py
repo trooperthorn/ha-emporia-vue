@@ -83,13 +83,12 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
         channel_num: str = coordinator.data[identifier]["channel_num"]
         self._device: VueDevice = coordinator.data[identifier]["info"]
         
-        # --- ADDED: Disable entity by default if no usage data is returned ---
+        # 1. Disable entity by default if no usage data is returned
         initial_usage = coordinator.data[identifier].get("usage")
         if initial_usage is None:
             self._attr_entity_registry_enabled_default = False
         else:
             self._attr_entity_registry_enabled_default = True
-        # ---------------------------------------------------------------------
 
         final_channel: VueDeviceChannel | None = None
         if self._device is not None:
@@ -98,7 +97,7 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
                     final_channel = channel
                     break
         if final_channel is None:
-            _LOGGER.debug(
+            _LOGGER.warning(
                 "No channel found for device_gid %s and channel_num %s",
                 device_gid,
                 channel_num,
@@ -109,11 +108,22 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
         self._channel: VueDeviceChannel = final_channel
         self._iskwh = self.scale_is_energy()
 
+        # 2. Add Device Registry Grouping
+        # Groups all entities under their parent hardware device in HA
+        self._attr_device_info = DeviceInfo(
+            identifiers={("emporia_vue", str(device_gid))}, # Use your specific DOMAIN variable here
+            name=self._device.device_name or f"Emporia Vue {device_gid}",
+            manufacturer="Emporia",
+            model=self._device.model,
+        )
+
         self._attr_has_entity_name = True
+        
         if self._iskwh:
             self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
             self._attr_device_class = SensorDeviceClass.ENERGY
-            self._attr_state_class = SensorStateClass.TOTAL
+            # Changed from TOTAL to TOTAL_INCREASING for accurate Energy Dashboard resets
+            self._attr_state_class = SensorStateClass.TOTAL_INCREASING 
             self._attr_suggested_display_precision = 3
             self._attr_name = f"Energy {self.scale_readable()}"
         else:
@@ -122,6 +132,18 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
             self._attr_state_class = SensorStateClass.MEASUREMENT
             self._attr_suggested_display_precision = 1
             self._attr_name = f"Power {self.scale_readable()}"
+
+    # 3. Add Custom Attributes for Scripting and Templating
+    @property
+    def extra_state_attributes(self) -> dict[str, any]:
+        """Return the state attributes of the sensor."""
+        return {
+            "channel_num": self._channel.channel_num,
+            "channel_name": self._channel.name,
+            "device_gid": self._device.device_gid,
+            "scale": self._scale,
+            "channel_multiplier": self._channel.channel_multiplier,
+        }
 
     @property
     def device_info(self) -> DeviceInfo:
