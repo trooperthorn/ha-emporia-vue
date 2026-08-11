@@ -27,10 +27,18 @@ from .const import (
     ENABLE_1M,
     ENABLE_1MON,
     MAINS_CHANNEL_NUMS,
+    MAINS_COMBINED_CHANNEL_NUM,
     MAINS_SPLIT_CHANNELS,
 )
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
+
+# Emporia's channel_type_gid for solar production channels. Used to make
+# sure solar isn't double-subtracted in the Balance calculation (see
+# VueBalanceSensor.native_value) — solar already nets out of the Mains
+# reading physically, since the Mains CTs sit upstream of the solar
+# interconnection point.
+SOLAR_CHANNEL_TYPE_GID = 13
 
 
 async def async_setup_entry(
@@ -85,8 +93,14 @@ async def async_setup_entry(
 
     # 2. ADD BALANCE AND GRID IMPORT/EXPORT SENSORS FOR ALL THREE SCALES
     # Always created, always enabled — independent of ENABLE_1M/1D/1MON.
+    # Gated on the device actually having a combined Mains channel, rather
+    # than a fragile "Vue" in device.model substring check (model strings
+    # like "VUE2" or differing casing would silently skip this block).
     for gid, device in device_information.items():
-        if device.model is not None and "Vue" in device.model:
+        has_mains_channel = any(
+            ch.channel_num == MAINS_COMBINED_CHANNEL_NUM for ch in device.channels
+        )
+        if has_mains_channel:
             for coordinator, scale in (
                 (coordinator_1min, "1MIN"),
                 (coordinator_day_sensor, "1D"),
@@ -115,30 +129,37 @@ async def async_setup_entry(
 
     async_add_entities(all_entities)
 
-    # 4. CLEAN UP / DISABLE DEVICES WITH ZERO ENTITIES
-    active_device_gids = {
-        getattr(entity, "_device_gid", None)
-        for entity in all_entities
-        if hasattr(entity, "_device_gid") and entity._device_gid is not None
-    }
+    # 4. CLEAN UP / DISABLE DEVICES WITH ZERO ACTIVE ENTITIES
+    # Built from each entity's own device_info property, which every HA
+    # entity has regardless of whether the subclass sets _attr_device_info
+    # or overrides the property directly. This replaces a prior approach
+    # keyed on an ad hoc `_device_gid` attribute that CurrentVuePowerSensor
+    # never set and that other classes typed inconsistently (str vs int),
+    # which caused two symptoms: the Mains/Grid device could get disabled
+    # even while it had active entities, and per-channel devices (whose
+    # registry identifier contains a hyphen, e.g. "12345-7") could never be
+    # disabled at all because int(identifier) always raised.
+    active_identifiers: set[tuple[str, str]] = set()
+    for entity in all_entities:
+        info = entity.device_info
+        if info and info.get("identifiers"):
+            active_identifiers.update(info["identifiers"])
 
     device_registry = dr.async_get(hass)
 
     for dev_entry in dr.async_entries_for_config_entry(device_registry, config_entry.entry_id):
-        dev_gid = None
-        for domain_name, identifier in dev_entry.identifiers:
-            if domain_name == DOMAIN:
-                try:
-                    dev_gid = int(identifier)
-                except ValueError:
-                    pass
+        is_active = any(ident in active_identifiers for ident in dev_entry.identifiers)
 
-        if dev_gid and dev_gid not in active_device_gids:
-            if not dev_entry.disabled_by:
-                device_registry.async_update_device(
-                    dev_entry.id,
-                    disabled_by=dr.DeviceEntryDisabler.INTEGRATION,
-                )
+        if is_active:
+            # Re-enable a device we previously auto-disabled, now that it
+            # has active entities again (e.g. a channel reappeared).
+            if dev_entry.disabled_by == dr.DeviceEntryDisabler.INTEGRATION:
+                device_registry.async_update_device(dev_entry.id, disabled_by=None)
+        elif dev_entry.disabled_by is None:
+            device_registry.async_update_device(
+                dev_entry.id,
+                disabled_by=dr.DeviceEntryDisabler.INTEGRATION,
+            )
 
 
 class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
@@ -385,6 +406,14 @@ class VueBalanceSensor(CoordinatorEntity, SensorEntity):
         self._scale = scale
         self._device_gid = device.device_gid
 
+        # Solar channel_nums for this device, precomputed so native_value
+        # doesn't need to re-scan device.channels on every update.
+        self._solar_channel_nums = {
+            ch.channel_num
+            for ch in (device.channels or [])
+            if ch.channel_type_gid == SOLAR_CHANNEL_TYPE_GID
+        }
+
         self._attr_has_entity_name = True
         self._attr_unique_id = f"vue_balance_{self._device_gid}_{scale}"
 
@@ -412,21 +441,33 @@ class VueBalanceSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self) -> float | None:
-        """Calculate the balance dynamically from the coordinator data."""
+        """Calculate the balance dynamically from the coordinator data.
+
+        Mains CTs sit upstream of the solar interconnection point, so the
+        Mains reading already reflects (House Consumption - Solar
+        Production) — it goes negative when solar exports more than the
+        house is using. If solar's channel were folded into branch_usage
+        like a normal consumption circuit, its production would be
+        subtracted a second time here, driving Balance sharply negative
+        (and thus to the 0.0 floor) any time solar output is significant.
+        So solar is tracked separately and added back rather than treated
+        as a consumption branch:
+
+            Balance = (Mains + Solar Production) - sum(other branches)
+        """
         if not self.coordinator.data:
             return None
 
         mains_usage = 0.0
         branch_usage = 0.0
-        reset_ts = None
+        solar_usage = 0.0
 
         for identifier, data in self.coordinator.data.items():
             if data.get("device_gid") != self._device_gid or data.get("scale") != self._scale:
                 continue
             channel_num = str(data.get("channel_num"))
             if channel_num in MAINS_SPLIT_CHANNELS:
-                # Derived Import/Export entries — not part of the raw
-                # Mains-minus-branches calculation.
+                # Derived Import/Export entries — not part of this calculation.
                 continue
 
             usage = data.get("usage")
@@ -435,11 +476,16 @@ class VueBalanceSensor(CoordinatorEntity, SensorEntity):
 
             if channel_num in ("1", "2", "3", "1,2,3"):
                 mains_usage += usage
-                reset_ts = data.get("reset") or reset_ts
+            elif channel_num in self._solar_channel_nums:
+                solar_usage += usage
             elif channel_num.isdigit() and int(channel_num) >= 4:
                 branch_usage += usage
 
-        balance = mains_usage - branch_usage
+        balance = (mains_usage + solar_usage) - branch_usage
+
+        # Due to slight analog inaccuracies in CT clamps, the sum of branches
+        # can occasionally exceed Mains+Solar by a tiny fraction. The Emporia
+        # app floors this at 0, so we do the same to prevent UI artifacts.
         return max(balance, 0.0)
 
     @property
@@ -448,7 +494,10 @@ class VueBalanceSensor(CoordinatorEntity, SensorEntity):
         return {
             "device_gid": self._device_gid,
             "scale": self._scale,
-            "description": "Calculated: Total Mains minus Sum of Branch Circuits",
+            "description": (
+                "Calculated: (Total Mains + Solar Production) minus "
+                "Sum of other Monitored Branch Circuits"
+            ),
         }
 
     @property
@@ -469,9 +518,12 @@ class VueMainsSplitSensor(CoordinatorEntity, SensorEntity):
     """Representation of the Grid Import or Export sensor.
 
     Reads a pre-computed value from coordinator data (see
-    add_minute_mains_split / integrate_mains_split in __init__.py) rather
-    than deriving it from a period-net sign, which is only valid for
-    instantaneous (Minute) power, not for Day/Month energy totals.
+    add_minute_mains_split / integrate_mains_split in __init__.py), derived
+    from the sign of the combined Mains channel at MINUTE resolution. This
+    already correctly handles solar export: when solar production exceeds
+    house load, the Mains CT reads negative for that minute, and that
+    minute's magnitude is accumulated into Export rather than Import —
+    independent of anything happening on the solar channel itself.
     """
 
     def __init__(self, coordinator, device: VueDevice, scale: str, direction: str) -> None:
@@ -515,8 +567,6 @@ class VueMainsSplitSensor(CoordinatorEntity, SensorEntity):
         """Return the pre-computed Import/Export value for this scale."""
         entry = self.coordinator.data.get(self._id) if self.coordinator.data else None
         if not entry:
-            # Not yet accumulated for this period — 0 for energy totals,
-            # unknown for instantaneous power.
             return 0.0 if self._iskwh else None
         return entry.get("usage")
 
