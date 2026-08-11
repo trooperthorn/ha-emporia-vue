@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from functools import partial
 import logging
 from typing import Any
+from collections.abc import Mapping
 
 
 import voluptuous as vol
@@ -50,39 +51,51 @@ def redact_config_data(data: Mapping[str, Any]) -> dict[str, Any]:
 
 
 class VueHub:
-    def __init__(self):
+    """Hub for managing Emporia Vue authentication during config flow."""
+
+    def __init__(self, hass: HomeAssistant) -> None:
         """Initialize the hub."""
         # --- LAZY IMPORT ---
         from pyemvue import PyEmVue
         
+        self.hass = hass
         self.vue = PyEmVue()
 
-    async def authenticate(self, data: dict | Mapping[str, Any]) -> bool:
+    async def authenticate(self, data: dict[str, Any] | Mapping[str, Any]) -> bool:
         """Test if we can authenticate with the host."""
-        loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
         auth_method = data.get(AUTH_METHOD, AUTH_METHOD_EMAIL_PASSWORD)
-        if auth_method == AUTH_METHOD_TOKENS:
-            return await loop.run_in_executor(
-                None,
-                partial(
-                    self.vue.login,
-                    id_token=data[CONF_ID_TOKEN],
-                    access_token=data[CONF_ACCESS_TOKEN],
-                    refresh_token=data[CONF_REFRESH_TOKEN],
-                ),
-            )
+        
+        try:
+            if auth_method == AUTH_METHOD_TOKENS:
+                return await self.hass.async_add_executor_job(
+                    partial(
+                        self.vue.login,
+                        id_token=data[CONF_ID_TOKEN],
+                        access_token=data[CONF_ACCESS_TOKEN],
+                        refresh_token=data[CONF_REFRESH_TOKEN],
+                    )
+                )
 
-        username = data[CONF_EMAIL]
-        password = data[CONF_PASSWORD]
-        # support using the simulator by looking at the username
-        # if formatted like vue_simulator@localhost:8000 then use the simulator
-        if username.startswith("vue_simulator@"):
-            host = username.split("@")[1]
-            return await loop.run_in_executor(None, self.vue.login_simulator, host)
-        return await loop.run_in_executor(
-            None,
-            partial(self.vue.login, username=username, password=password),
-        )
+            username = data[CONF_EMAIL]
+            password = data[CONF_PASSWORD]
+            
+            # support using the simulator by looking at the username
+            # if formatted like vue_simulator@localhost:8000 then use the simulator
+            if username.startswith("vue_simulator@"):
+                host = username.split("@")[1]
+                return await self.hass.async_add_executor_job(
+                    self.vue.login_simulator, host
+                )
+                
+            return await self.hass.async_add_executor_job(
+                self.vue.login, username, password
+            )
+            
+        except Exception as err:
+            # Catch network timeouts, bad passwords, or 401 Unauthorized errors
+            # and log them cleanly instead of crashing the Config Flow UI.
+            _LOGGER.debug("Emporia Vue authentication failed: %s", err)
+            return False
 
 
 async def validate_input(data: dict | Mapping[str, Any]) -> dict[str, Any]:
@@ -96,7 +109,7 @@ async def validate_input(data: dict | Mapping[str, Any]) -> dict[str, Any]:
     from pyemvue import PyEmVue
     # --------------------
 
-    hub = VueHub()
+    hub = VueHub(hass)
     if not await hub.authenticate(data):
         raise InvalidAuth
 
