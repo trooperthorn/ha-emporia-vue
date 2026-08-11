@@ -6,8 +6,14 @@ from typing import Any
 from pyemvue import PyEmVue
 from pyemvue.device import VueDevice
 from requests import exceptions
+from homeassistant.components.number import (
+    NumberDeviceClass,
+    NumberEntity,
+    NumberMode,
+)
+from homeassistant.components.number import NumberMode
+from homeassistant.exceptions import HomeAssistantError
 
-from homeassistant.components.number import NumberDeviceClass, NumberEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfElectricCurrent
 from homeassistant.core import HomeAssistant
@@ -54,6 +60,11 @@ async def async_setup_entry(
 class EmporiaChargerCurrentNumber(EmporiaChargerEntity, NumberEntity):  # type: ignore
     """Representation of the Emporia EV Charger current limit."""
 
+    _attr_mode = NumberMode.SLIDER
+    _attr_icon = "mdi:current-ac"
+    _attr_name = "Current Limit"
+    _attr_translation_key = "charge_current_limit"
+
     def __init__(
         self,
         coordinator: DataUpdateCoordinator[dict[str, Any]],
@@ -71,39 +82,54 @@ class EmporiaChargerCurrentNumber(EmporiaChargerEntity, NumberEntity):  # type: 
         self._attr_native_min_value = 6.0
         self._attr_native_max_value = float(device.ev_charger.max_charging_rate)
         self._attr_native_step = 1.0
-        self._attr_translation_key = "charge_current_limit"
-        self._attr_icon = "mdi:current-ac"
-        self._attr_name = "Current Limit"
+        self._attr_unique_id = f"emporia_vue.charger_current_{self._device_gid}"
 
-    @property
-    def unique_id(self) -> str:
-        """Unique ID for the number entity."""
-        return f"emporia_vue.charger_current_{self._device_gid}"
+        # Optimistic state to prevent the slider from snapping back while waiting for API
+        self._optimistic_value: float | None = None
 
     @property
     def native_value(self) -> float | None:
         """Return the current charging rate."""
+        # Return the optimistic value immediately if an API update was recently fired
+        if self._optimistic_value is not None:
+            return self._optimistic_value
+
         data = self.coordinator.data.get(self._device_gid)
         if data:
             return float(data.charging_rate)
         return None
 
     async def async_set_native_value(self, value: float) -> None:
-        """Set the charger current limit."""
+        """Set the charger current limit with optimistic UI response."""
         current = int(value)
         current = max(6, min(current, int(self._attr_native_max_value)))
+
+        # Remember previous value in case the API call fails
+        previous_value = self.native_value
+
+        # 1. Instantly update the HA UI optimistically
+        self._optimistic_value = float(current)
+        self.async_write_ha_state()
+
         try:
+            # 2. Execute the API call in the executor thread
             await self.hass.async_add_executor_job(
                 self._vue.update_charger,
                 self.coordinator.data[self._device_gid],
                 self.coordinator.data[self._device_gid].charger_on,
                 current,
             )
-        except exceptions.HTTPError as err:
-            _LOGGER.error(
-                "Error updating charger current: %s \nResponse body: %s",
-                err,
-                err.response.text,
-            )
-            raise
-        await self.coordinator.async_request_refresh()
+            # 3. Request a fresh poll from the coordinator
+            await self.coordinator.async_request_refresh()
+        except Exception as err:
+            # 4. If the call fails, revert the slider and raise a clean HA error
+            self._optimistic_value = previous_value
+            self.async_write_ha_state()
+            _LOGGER.error("Error updating charger current: %s", err)
+            raise HomeAssistantError(
+                f"Failed to set Emporia charger current: {err}"
+            ) from err
+        finally:
+            # 5. Clear optimistic state override so entity relies on live coordinator data
+            self._optimistic_value = None
+            self.async_write_ha_state()
