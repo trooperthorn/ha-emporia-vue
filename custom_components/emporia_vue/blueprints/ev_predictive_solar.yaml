@@ -1,0 +1,48 @@
+blueprint:
+  name: "EV Charging: Pre-Sunset Ramp Down"
+  description: "Gradually reduces EV charging speed as the sun sets to prevent pulling expensive grid power during peak evening hours."
+  domain: automation
+  input:
+    sun_elevation:
+      name: Sun Elevation Sensor
+      description: "Sensor tracking sun elevation angle (e.g., sensor.sun_solar_elevation or sun.sun)"
+      selector:
+        entity:
+          domain: sun
+    charger_switch:
+      name: EV Charger Switch
+      selector:
+        entity:
+          domain: switch
+    charger_amps:
+      name: EV Charger Amperage Control
+      selector:
+        entity:
+          domain: number
+
+mode: restart
+trigger:
+  - platform: numeric_state
+    entity_id: !input sun_elevation
+    attribute: elevation
+    below: 15
+action:
+  # Step 1: Drop to 16A when sun drops below 15 degrees elevation
+  - action: number.set_value
+    target:
+      entity_id: !input charger_amps
+    data:
+      value: 16
+
+  # Step 2: Wait until sun drops below 5 degrees elevation
+  - wait_for_trigger:
+      - platform: numeric_state
+        entity_id: !input sun_elevation
+        attribute: elevation
+        below: 5
+    timeout: "01:00:00"
+
+  # Step 3: Pause charging completely before twilight/sunset
+  - action: switch.turn_off
+    target:
+      entity_id: !input charger_switch
