@@ -17,6 +17,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import DOMAIN
 
@@ -520,3 +521,81 @@ class VueMainsSplitSensor(CoordinatorEntity, SensorEntity):
             "scale": self._scale,
             "description": f"Calculated: {self._direction} from Mains CTs",
         }
+
+class EmporiaEVChargeTimeNeededSensor(SensorEntity):
+    """Representation of calculated EV Charge Time Needed."""
+
+    _attr_native_unit_of_measurement = "h"
+    _attr_icon = "mdi:timer-sand"
+    _attr_name = "EV Charge Time Needed"
+    _attr_has_entity_name = True
+
+    def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry, charger_device: VueDevice) -> None:
+        """Initialize the charge time sensor."""
+        self.hass = hass
+        self._config_entry = config_entry
+        self._charger_device = charger_device
+        self._device_gid = charger_device.device_gid
+        
+        self._attr_unique_id = f"emporia_vue_ev_charge_time_needed_{self._device_gid}"
+        
+        self._attr_device_info = DeviceInfo(
+            identifiers={("emporia_vue", str(self._device_gid))},
+            name=self._charger_device.device_name or f"Emporia Vue {self._device_gid}",
+            manufacturer="Emporia",
+            model=self._charger_device.model,
+        )
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to vehicle battery sensor state changes."""
+        await super().async_added_to_hass()
+        
+        vehicle_soc_sensor = self._config_entry.options.get("vehicle_soc_sensor")
+        if vehicle_soc_sensor:
+            # Re-evaluate calculation whenever the vehicle SoC sensor changes
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass, [vehicle_soc_sensor], self._async_on_soc_update
+                )
+            )
+
+    async def _async_on_soc_update(self, event) -> None:
+        """Handle vehicle SoC updates."""
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> float | None:
+        """Calculate charge time needed in hours."""
+        vehicle_soc_sensor = self._config_entry.options.get("vehicle_soc_sensor")
+        battery_capacity = float(self._config_entry.options.get("battery_capacity_kwh", 80.0))
+
+        if not vehicle_soc_sensor:
+            return None
+
+        soc_state = self.hass.states.get(vehicle_soc_sensor)
+        if not soc_state or soc_state.state in ["unknown", "unavailable"]:
+            return None
+
+        try:
+            current_soc = float(soc_state.state)
+        except ValueError:
+            return None
+
+        # 1. Energy Needed
+        target_soc = 100.0
+        percent_needed = max(target_soc - current_soc, 0.0)
+        kwh_needed = (percent_needed / 100.0) * battery_capacity
+
+        # 2. Get current charger rate from HA state (default to 40A @ 240V if missing)
+        amps_entity = f"number.emporia_vue_charger_current_{self._device_gid}"
+        amps_state = self.hass.states.get(amps_entity)
+        amps = float(amps_state.state) if amps_state and amps_state.state.replace('.', '', 1).isdigit() else 40.0
+
+        charge_rate_kw = (amps * 240.0) / 1000.0
+
+        if charge_rate_kw <= 0:
+            return 0.0
+
+        # 3. Hours needed (with 10% charging loss buffer)
+        hours_needed = (kwh_needed / charge_rate_kw) * 1.1
+        return round(hours_needed, 2)
