@@ -40,6 +40,50 @@ _LOGGER: logging.Logger = logging.getLogger(__name__)
 # interconnection point.
 SOLAR_CHANNEL_TYPE_GID = 13
 
+# Native Emporia channel labels for a device-side, already-computed
+# Import/Export split. Where present, these are preferred over our own
+# minute-integrated derivation (see VueMainsSplitSensor).
+NATIVE_MAINS_FROM_GRID = "MainsFromGrid"
+NATIVE_MAINS_TO_GRID = "MainsToGrid"
+
+
+def _device_is_true_mains_panel(device: VueDevice) -> bool:
+    """Return True only if this device is a genuine Mains/panel device.
+
+    A device qualifies if it has the combined "1,2,3" channel AND at least
+    one other real channel alongside it. A device reporting only a bare
+    "1,2,3" with nothing else is a single-CT monitor — e.g. a dedicated
+    solar production meter reporting its lone clamp reading through the
+    same generic aggregate label — not a household panel/grid connection,
+    and should not get Balance/Grid Import-Export sensors synthesized
+    for it.
+    """
+    channel_nums = {ch.channel_num for ch in (device.channels or [])}
+    if MAINS_COMBINED_CHANNEL_NUM not in channel_nums:
+        return False
+    other_channels = channel_nums - {MAINS_COMBINED_CHANNEL_NUM} - MAINS_SPLIT_CHANNELS
+    return len(other_channels) > 0
+
+
+def _coordinator_has_native_mains_split(coordinator, device_gid: int) -> bool:
+    """Return True if this coordinator's current data includes Emporia's
+    own native MainsFromGrid/MainsToGrid channels for this device.
+
+    Checked per-coordinator (i.e. per scale) rather than once globally,
+    since Emporia may only surface these channels at some scales (e.g.
+    Day/Month) and not others (e.g. Minute) for a given account.
+    """
+    if not coordinator or not coordinator.data:
+        return False
+    found = {NATIVE_MAINS_FROM_GRID: False, NATIVE_MAINS_TO_GRID: False}
+    for entry in coordinator.data.values():
+        if entry.get("device_gid") != device_gid:
+            continue
+        channel_num = entry.get("channel_num")
+        if channel_num in found:
+            found[channel_num] = True
+    return all(found.values())
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -87,28 +131,38 @@ async def async_setup_entry(
             )
 
     # 1. ADD PER-CHANNEL SENSORS FOR ALL THREE SCALES
+    # Every channel is always created for Minute, Day, and Month — this
+    # includes single-CT monitors (e.g. solar) via their own "1,2,3"
+    # channel, native MainsFromGrid/MainsToGrid channels where Emporia
+    # provides them, and every ordinary branch circuit.
     add_scale_block(coordinator_1min, enable_1m)
     add_scale_block(coordinator_day_sensor, enable_1d)
     add_scale_block(coordinator_1mon, enable_1mon)
 
     # 2. ADD BALANCE AND GRID IMPORT/EXPORT SENSORS FOR ALL THREE SCALES
-    # Always created, always enabled — independent of ENABLE_1M/1D/1MON.
-    # Gated on the device actually having a combined Mains channel, rather
-    # than a fragile "Vue" in device.model substring check (model strings
-    # like "VUE2" or differing casing would silently skip this block).
+    # Always created, always enabled — independent of ENABLE_1M/1D/1MON —
+    # but only for devices that are genuinely a Mains/panel device (see
+    # _device_is_true_mains_panel). The derived Grid Import/Export sensor
+    # is skipped per-scale wherever that scale already has Emporia's own
+    # native MainsFromGrid/MainsToGrid channels, since CurrentVuePowerSensor
+    # already creates entities for those (via MAINS_CHANNEL_NUMS) and
+    # they're a more authoritative source than our minute-integrated
+    # derivation.
     for gid, device in device_information.items():
-        has_mains_channel = any(
-            ch.channel_num == MAINS_COMBINED_CHANNEL_NUM for ch in device.channels
-        )
-        if has_mains_channel:
+        if _device_is_true_mains_panel(device):
             for coordinator, scale in (
                 (coordinator_1min, "1MIN"),
                 (coordinator_day_sensor, "1D"),
                 (coordinator_1mon, "1MON"),
             ):
                 all_entities.append(VueBalanceSensor(coordinator, device, scale))
-                all_entities.append(VueMainsSplitSensor(coordinator, device, scale, "Import"))
-                all_entities.append(VueMainsSplitSensor(coordinator, device, scale, "Export"))
+                if not _coordinator_has_native_mains_split(coordinator, gid):
+                    all_entities.append(
+                        VueMainsSplitSensor(coordinator, device, scale, "Import")
+                    )
+                    all_entities.append(
+                        VueMainsSplitSensor(coordinator, device, scale, "Export")
+                    )
 
     # 3. ADD CHARGER STATUS & CHARGE TIME SENSORS
     if coordinator_device_status and coordinator_device_status.data:
@@ -132,13 +186,18 @@ async def async_setup_entry(
     # 4. CLEAN UP / DISABLE DEVICES WITH ZERO ACTIVE ENTITIES
     # Built from each entity's own device_info property, which every HA
     # entity has regardless of whether the subclass sets _attr_device_info
-    # or overrides the property directly. This replaces a prior approach
-    # keyed on an ad hoc `_device_gid` attribute that CurrentVuePowerSensor
-    # never set and that other classes typed inconsistently (str vs int),
-    # which caused two symptoms: the Mains/Grid device could get disabled
-    # even while it had active entities, and per-channel devices (whose
-    # registry identifier contains a hyphen, e.g. "12345-7") could never be
-    # disabled at all because int(identifier) always raised.
+    # or overrides the property directly. This works uniformly across
+    # every entity class in this file, including devices that only ever
+    # get a plain CurrentVuePowerSensor (e.g. single-CT solar monitors).
+    #
+    # Known limitation: this only sees entities created in THIS platform's
+    # async_setup_entry. A device populated entirely by switch.py/number.py
+    # (e.g. a smart outlet with no EV charger, which never appears in
+    # sensor.py at all) will still be misjudged as inactive here. Fixing
+    # that properly means moving this pass to __init__.py, run once after
+    # all platforms have finished forwarding entry setup, and building the
+    # active set from the entity registry directly instead of one
+    # platform's local list.
     active_identifiers: set[tuple[str, str]] = set()
     for entity in all_entities:
         info = entity.device_info
@@ -515,15 +574,20 @@ class VueBalanceSensor(CoordinatorEntity, SensorEntity):
 
 
 class VueMainsSplitSensor(CoordinatorEntity, SensorEntity):
-    """Representation of the Grid Import or Export sensor.
+    """Representation of the derived Grid Import or Export sensor.
 
     Reads a pre-computed value from coordinator data (see
     add_minute_mains_split / integrate_mains_split in __init__.py), derived
     from the sign of the combined Mains channel at MINUTE resolution. This
-    already correctly handles solar export: when solar production exceeds
-    house load, the Mains CT reads negative for that minute, and that
-    minute's magnitude is accumulated into Export rather than Import —
-    independent of anything happening on the solar channel itself.
+    correctly handles solar export: when solar production exceeds house
+    load, the Mains CT reads negative for that minute, and that minute's
+    magnitude is accumulated into Export rather than Import.
+
+    Only instantiated where the device/scale combination lacks Emporia's
+    own native MainsFromGrid/MainsToGrid channels (see
+    _coordinator_has_native_mains_split in async_setup_entry) — where those
+    exist, they're a more authoritative source and are surfaced instead via
+    the ordinary CurrentVuePowerSensor path.
     """
 
     def __init__(self, coordinator, device: VueDevice, scale: str, direction: str) -> None:
