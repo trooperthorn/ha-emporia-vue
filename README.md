@@ -1,5 +1,7 @@
 # emporia_vue Home Assistant Integration
 
+# MODIFIED for Full Home Assistant Energy support. Coding optimization via GEMINI Pro.
+
 Reads data from the Emporia Vue energy monitor. Creates a sensor for each device channel showing average usage over each minute.
 
 Note: This project is not associated with or endorsed by Emporia Energy.
