@@ -40,15 +40,30 @@ async def async_setup_entry(
 
     _LOGGER.info(hass.data[DOMAIN][config_entry.entry_id])
 
-    # 1. ADD THE 1-MINUTE SENSORS (Including Balance)
+    # 1. ADD THE 1-MINUTE SENSORS
     if coordinator_1min:
         async_add_entities(
             CurrentVuePowerSensor(coordinator_1min, identifier)
             for _, identifier in enumerate(coordinator_1min.data)
         )
-        # Add Balance Sensor for 1-minute Power
+        
+        # Add Balance Sensor
         async_add_entities(
             VueBalanceSensor(coordinator_1min, device, "1MIN")
+            for gid, device in device_information.items()
+            if device.model is not None and "Vue" in device.model
+        )
+        
+        # Add Grid Import Sensor
+        async_add_entities(
+            VueMainsSplitSensor(coordinator_1min, device, "1MIN", "Import")
+            for gid, device in device_information.items()
+            if device.model is not None and "Vue" in device.model
+        )
+        
+        # Add Grid Export Sensor
+        async_add_entities(
+            VueMainsSplitSensor(coordinator_1min, device, "1MIN", "Export")
             for gid, device in device_information.items()
             if device.model is not None and "Vue" in device.model
         )
@@ -418,4 +433,79 @@ class VueBalanceSensor(CoordinatorEntity, SensorEntity):
             "device_gid": self._device_gid,
             "scale": self._scale,
             "description": "Calculated: Total Mains minus Sum of Branch Circuits",
+        }
+
+class VueMainsSplitSensor(CoordinatorEntity, SensorEntity):
+    """Representation of calculated Grid Import or Export sensors."""
+
+    def __init__(self, coordinator, device, scale: str, direction: str) -> None:
+        """Initialize the split mains sensor."""
+        super().__init__(coordinator)
+        self._device = device
+        self._scale = scale
+        self._device_gid = device.device_gid
+        # Direction is either "Import" or "Export"
+        self._direction = direction 
+
+        self._attr_has_entity_name = True
+        self._attr_unique_id = f"vue_mains_{self._direction.lower()}_{self._device_gid}_{scale}"
+
+        self._attr_device_info = DeviceInfo(
+            identifiers={("emporia_vue", str(self._device_gid))},
+            name=self._device.device_name or f"Emporia Vue {self._device_gid}",
+            manufacturer="Emporia",
+            model=self._device.model,
+        )
+
+        self._iskwh = scale not in ["1S", "1MIN"]
+
+        if self._iskwh:
+            self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+            self._attr_device_class = SensorDeviceClass.ENERGY
+            self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+            self._attr_suggested_display_precision = 3
+            self._attr_name = f"Grid {self._direction} Energy ({scale})"
+        else:
+            self._attr_native_unit_of_measurement = UnitOfPower.WATT
+            self._attr_device_class = SensorDeviceClass.POWER
+            self._attr_state_class = SensorStateClass.MEASUREMENT
+            self._attr_suggested_display_precision = 1
+            self._attr_name = f"Grid {self._direction} Power ({scale})"
+
+    @property
+    def native_value(self) -> float | None:
+        """Calculate the Import or Export dynamically."""
+        if not self.coordinator.data:
+            return None
+
+        mains_usage = 0.0
+        mains_found = False
+
+        # Sum up the Mains channels (1, 2, and 3)
+        for identifier, data in self.coordinator.data.items():
+            if data.get("device_gid") == self._device_gid and data.get("scale") == self._scale:
+                usage = data.get("usage")
+                if usage is None:
+                    continue
+
+                channel_num = str(data.get("channel_num"))
+                if channel_num in ["1", "2", "3", "1,2,3"]:
+                    mains_usage += usage
+                    mains_found = True
+
+        if not mains_found:
+            return None
+
+        # Return strictly positive values based on the direction requested
+        if self._direction == "Import":
+            return mains_usage if mains_usage > 0 else 0.0
+        elif self._direction == "Export":
+            return abs(mains_usage) if mains_usage < 0 else 0.0
+
+    @property
+    def extra_state_attributes(self) -> dict[str, any]:
+        return {
+            "device_gid": self._device_gid,
+            "scale": self._scale,
+            "description": f"Calculated: {self._direction} from Mains CTs",
         }
