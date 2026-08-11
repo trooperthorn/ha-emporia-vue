@@ -48,6 +48,10 @@ from .const import (
     ENABLE_1D,
     ENABLE_1M,
     ENABLE_1MON,
+    MAINS_COMBINED_CHANNEL_NUM,
+    MAINS_SPLIT_CHANNEL_EXPORT,
+    MAINS_SPLIT_CHANNEL_IMPORT,
+    MAINS_SPLIT_CHANNELS,
     SOLAR_INVERT,
     VUE_DATA,
 )
@@ -76,6 +80,13 @@ LAST_DAY_UPDATE: datetime | None = None
 LAST_MONTH_DATA: dict[str, Any] = {}
 LAST_MONTH_UPDATE: datetime | None = None
 INVERT_SOLAR: bool = True
+
+# NOTE: DEVICE_GIDS/DEVICE_INFORMATION/LAST_*_DATA are module-level globals,
+# reset at the start of every async_setup_entry call. This is only safe for a
+# single config entry (one Emporia account) per HA instance. If you run
+# multiple accounts, this state will bleed between them. Moving this into
+# hass.data[DOMAIN][entry.entry_id], scoped per entry, is a larger follow-up
+# refactor and is intentionally out of scope for this patch.
 
 
 def redact_config_data(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -130,7 +141,6 @@ async def async_login_vue(
 
     email: str = entry_data[CONF_EMAIL]
     password: str = entry_data[CONF_PASSWORD]
-    # support using the simulator by looking at the username
     if email.startswith("vue_simulator@"):
         host = email.split("@")[1]
         return await loop.run_in_executor(None, vue.login_simulator, host)
@@ -169,8 +179,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise ConfigEntryAuthFailed("Failed to login to Emporia Vue") from err
 
     if entry_data.get(AUTH_METHOD) == AUTH_METHOD_TOKENS and vue.auth and vue.auth.tokens:
-        # Persist the tokens refreshed during login back to the config entry so
-        # that the stored tokens stay current across restarts.
         hass.config_entries.async_update_entry(
             entry,
             data={
@@ -223,9 +231,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             so entities can quickly look up their data.
             """
             data: dict = await update_sensors(vue, [Scale.MINUTE.value])
-            # store this, then have the daily sensors pull from it and integrate
-            # then the daily can "true up" hourly (or more frequent) in case it's incorrect
             if data:
+                add_minute_mains_split(data)
                 global LAST_MINUTE_DATA
                 LAST_MINUTE_DATA = data
             return data
@@ -239,13 +246,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 LAST_DAY_UPDATE = now
                 updated_day_data = await update_sensors(vue, [Scale.DAY.value])
                 apply_api_update_debounce(updated_day_data, LAST_DAY_DATA, "day")
+                # Preserve locally-accumulated Import/Export totals across the
+                # API refresh; Emporia's API doesn't provide these directly.
+                carry_forward_mains_split(LAST_DAY_DATA, updated_day_data)
                 LAST_DAY_DATA = updated_day_data
             else:
-                # integrate the minute data
                 _LOGGER.info("Integrating minute data into day sensors")
                 if LAST_MINUTE_DATA:
                     for identifier, data in LAST_MINUTE_DATA.items():
                         device_gid, channel_gid, _ = identifier.split("-")
+                        if channel_gid in MAINS_SPLIT_CHANNELS:
+                            # Handled below via integrate_mains_split, sourced
+                            # from the combined mains channel directly.
+                            continue
                         day_id: str = f"{device_gid}-{channel_gid}-{Scale.DAY.value}"
                         if (
                             data
@@ -255,13 +268,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             and "usage" in LAST_DAY_DATA[day_id]
                             and LAST_DAY_DATA[day_id]["usage"] is not None
                         ):
-                            # if we just passed midnight, then reset back to zero
                             timestamp: datetime = data["timestamp"]
-                            await check_for_midnight(timestamp, int(device_gid), day_id)
+                            await check_for_midnight(
+                                timestamp, int(device_gid), day_id, LAST_DAY_DATA
+                            )
+                            LAST_DAY_DATA[day_id]["usage"] += data["usage"]
 
-                            LAST_DAY_DATA[day_id]["usage"] += data[
-                                "usage"
-                            ]  # already in kwh
+                        if channel_gid == MAINS_COMBINED_CHANNEL_NUM:
+                            await integrate_mains_split(
+                                device_gid, data, LAST_DAY_DATA, is_month=False
+                            )
             return LAST_DAY_DATA
 
         async def async_update_month_sensors() -> dict:
@@ -277,13 +293,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     LAST_MONTH_DATA,
                     "month",
                 )
+                carry_forward_mains_split(LAST_MONTH_DATA, updated_month_data)
                 LAST_MONTH_DATA = updated_month_data
             else:
-                # integrate the minute data
                 _LOGGER.info("Integrating minute data into month sensors")
                 if LAST_MINUTE_DATA:
                     for identifier, data in LAST_MINUTE_DATA.items():
                         device_gid, channel_gid, _ = identifier.split("-")
+                        if channel_gid in MAINS_SPLIT_CHANNELS:
+                            continue
                         month_id: str = f"{device_gid}-{channel_gid}-{Scale.MONTH.value}"
                         if (
                             data
@@ -293,38 +311,52 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             and "usage" in LAST_MONTH_DATA[month_id]
                             and LAST_MONTH_DATA[month_id]["usage"] is not None
                         ):
-                            # if we just passed the billing cycle start, reset back to zero
                             timestamp: datetime = data["timestamp"]
-                            await check_for_new_month(timestamp, int(device_gid), month_id)
+                            await check_for_new_month(
+                                timestamp, int(device_gid), month_id, LAST_MONTH_DATA
+                            )
+                            LAST_MONTH_DATA[month_id]["usage"] += data["usage"]
 
-                            LAST_MONTH_DATA[month_id]["usage"] += data[
-                                "usage"
-                            ]  # already in kwh
+                        if channel_gid == MAINS_COMBINED_CHANNEL_NUM:
+                            await integrate_mains_split(
+                                device_gid, data, LAST_MONTH_DATA, is_month=True
+                            )
             return LAST_MONTH_DATA
 
-        coordinator_1min = None
+        # All three coordinators are always created and always poll,
+        # regardless of ENABLE_1M/1D/1MON. Those options now only control
+        # each non-Mains entity's default-enabled state in the entity
+        # registry (see sensor.py) — they must never stop Mains/Grid data
+        # from being fetched.
         coordinator_1min = DataUpdateCoordinator(
-            hass, _LOGGER, name="sensor",
+            hass,
+            _LOGGER,
+            name="sensor",
             update_method=async_update_data_1min,
             update_interval=timedelta(minutes=1),
         )
         await coordinator_1min.async_config_entry_first_refresh()
+        _LOGGER.debug("1min Update data: %s", coordinator_1min.data)
 
         coordinator_1mon = DataUpdateCoordinator(
-            hass, _LOGGER, name="sensor",
+            hass,
+            _LOGGER,
+            name="sensor",
             update_method=async_update_month_sensors,
             update_interval=timedelta(minutes=1),
         )
         await coordinator_1mon.async_config_entry_first_refresh()
+        _LOGGER.debug("1mon Update data: %s", coordinator_1mon.data)
 
         coordinator_day_sensor = DataUpdateCoordinator(
-            hass, _LOGGER, name="sensor",
+            hass,
+            _LOGGER,
+            name="sensor",
             update_method=async_update_day_sensors,
             update_interval=timedelta(minutes=1),
         )
         await coordinator_day_sensor.async_config_entry_first_refresh()
 
-        # Check if any devices have outlets or chargers
         has_controllable_devices = any(
             device.outlet or device.ev_charger
             for device in DEVICE_INFORMATION.values()
@@ -360,7 +392,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             await coordinator_device_status.async_config_entry_first_refresh()
 
-        # Setup custom services
         async def handle_set_charger_current(call) -> None:
             """Handle setting the EV Charger current."""
             _LOGGER.debug(
@@ -373,14 +404,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             device_id: str | list[str] | None = call.data.get("device_id", None)
             entity_id: str | list[str] | None = call.data.get("entity_id", None)
 
-            # if device or entity ids are strings, convert to list
             if isinstance(device_id, str):
                 device_id = [device_id]
             if isinstance(entity_id, str):
                 entity_id = [entity_id]
 
-            # technically we should loop through all the passed device and entities and update all
-            # but for now we'll just use the first one
             charger_entity: er.RegistryEntry | None = None
             entity_registry: er.EntityRegistry = er.async_get(hass)
             if device_id:
@@ -427,7 +455,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 raise HomeAssistantError(
                     f"Could not find charger info for device {charger_gid}"
                 )
-            # Scale the current to a minimum of 6 amps and max of the circuit max
             current: int = max(6, current)
             current = min(current, charger_info.ev_charger.max_charging_rate)
             _LOGGER.info(
@@ -443,13 +470,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     current,
                 )
                 DEVICE_INFORMATION[charger_gid].ev_charger = updated_charger
-                # update the state of the charger entity using the updated data
                 state: State | None = hass.states.get(charger_entity.entity_id)
                 if state:
                     new_state: str = "on" if updated_charger.charger_on else "off"
                     new_attributes: dict = state.attributes.copy()
                     new_attributes["charging_rate"] = updated_charger.charging_rate
-                    # good enough for now, update the state in the registry
                     hass.states.async_set(
                         charger_entity.entity_id, new_state, new_attributes
                     )
@@ -509,8 +534,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def update_sensors(vue: PyEmVue, scales: list[str]) -> dict:
     """Fetch data from API endpoint."""
     try:
-        # Note: asyncio.TimeoutError and aiohttp.ClientError are already
-        # handled by the data update coordinator.
         data: dict = {}
         loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
         for scale in scales:
@@ -599,18 +622,12 @@ async def parse_flattened_usage_data(
             reset_datetime: datetime | None = None
 
             if scale in [Scale.DAY.value, Scale.MONTH.value]:
-                # We need to know when the value reset
-                # For day, that should be midnight local time, but we need to use the timestamp
-                # returnedto us for month, that should be midnight of the reset day they specify
-                # in the app
                 reset_datetime = determine_reset_datetime(
                     local_time,
                     info.billing_cycle_start_day,
                     scale == Scale.MONTH.value,
                 )
 
-            # Fix the usage if we got None
-            # Use the last value if we have it, otherwise use zero
             fixed_usage: float = channel.usage if channel else 0.0
             if fixed_usage is None:
                 fixed_usage = handle_none_usage(scale, identifier)
@@ -640,8 +657,6 @@ async def parse_flattened_usage_data(
                 "timestamp": local_time,
             }
     if unused_data:
-        # unused_data is not json serializable because VueDeviceChannelUsage
-        # is not JSON serializable instead print out dictionary as a string
         _LOGGER.info(
             "Unused data found during update. Unused data: %s",
             str(unused_data),
@@ -649,9 +664,6 @@ async def parse_flattened_usage_data(
         channels_were_added = False
         for channel in unused_data.values():
             channels_were_added |= await handle_special_channels_for_device(channel)
-            # we'll also need to register these entities I think. They might show up
-            # automatically on the first run When we're done handling the unused data
-            # we need to rerun the update
         if channels_were_added:
             _LOGGER.info("Rerunning update due to added channels")
             await parse_flattened_usage_data(
@@ -663,12 +675,6 @@ async def handle_special_channels_for_device(channel: VueDeviceChannel) -> bool:
     """Handle the special channels for a device, if they exist."""
     if channel.device_gid in DEVICE_INFORMATION:
         device_info: VueDevice = DEVICE_INFORMATION[channel.device_gid]
-        # if channel.channel_num in [
-        #     "MainsFromGrid",
-        #     "MainsToGrid",
-        #     "Balance",
-        #     "TotalUsage",
-        # ]:
         found = False
         channel_123: VueDeviceChannel | None = None
         for device_channel in device_info.channels:
@@ -717,19 +723,14 @@ def fix_usage_sign(
 ) -> float:
     """If the channel is not '1,2,3' or 'Balance' we need it to be positive.
 
-    Solar circuits are up to the user to decide. Positive is recommended for the energy dashboard.
-
     (see https://github.com/magico13/ha-emporia-vue/issues/57)
     """
     if is_solar:
-        # Energy dashboard wants solar to be positive, Emporia usually provides negative
         if usage and invert_solar:
             return -1 * usage
         return usage
 
     if usage and not bidirectional and channel_num not in ["1,2,3", "Balance"]:
-        # With bidirectionality, we need to also check if bidirectional. If yes,
-        # we either don't abs, or we flip the sign.
         return abs(usage)
     return usage
 
@@ -741,13 +742,18 @@ async def change_time_to_local(time: datetime, tz_string: str) -> datetime:
         None, dateutil.tz.gettz, tz_string
     )
     if not time.tzinfo or time.tzinfo.utcoffset(time) is None:
-        # unaware, assume it's already utc
         time = time.replace(tzinfo=UTC)
     return time.astimezone(tz_info)
 
 
-async def check_for_midnight(timestamp: datetime, device_gid: int, day_id: str):
-    """If midnight has recently passed, reset the LAST_DAY_DATA for Day sensors to zero."""
+async def check_for_midnight(
+    timestamp: datetime, device_gid: int, day_id: str, data_dict: dict[str, Any]
+) -> None:
+    """If midnight has recently passed, reset data_dict[day_id]'s usage to zero.
+
+    data_dict is passed explicitly so this works for LAST_DAY_DATA as well as
+    the derived Mains Import/Export accumulation.
+    """
     if device_gid in DEVICE_INFORMATION:
         device_info: VueDevice = DEVICE_INFORMATION[device_gid]
         local_time: datetime = await change_time_to_local(
@@ -756,9 +762,8 @@ async def check_for_midnight(timestamp: datetime, device_gid: int, day_id: str):
         local_midnight: datetime = local_time.replace(
             hour=0, minute=0, second=0, microsecond=0
         )
-        last_reset = LAST_DAY_DATA[day_id]["reset"]
-        if local_midnight > last_reset:
-            # New reset time found
+        last_reset = data_dict[day_id]["reset"]
+        if last_reset is None or local_midnight > last_reset:
             _LOGGER.info(
                 "Midnight happened recently for id %s! Timestamp is %s, midnight is %s, "
                 "previous reset was %s",
@@ -767,12 +772,14 @@ async def check_for_midnight(timestamp: datetime, device_gid: int, day_id: str):
                 local_midnight,
                 last_reset,
             )
-            LAST_DAY_DATA[day_id]["usage"] = 0
-            LAST_DAY_DATA[day_id]["reset"] = local_midnight
+            data_dict[day_id]["usage"] = 0
+            data_dict[day_id]["reset"] = local_midnight
 
 
-async def check_for_new_month(timestamp: datetime, device_gid: int, month_id: str):
-    """If a new billing cycle has started, reset the LAST_MONTH_DATA for Month sensors to zero."""
+async def check_for_new_month(
+    timestamp: datetime, device_gid: int, month_id: str, data_dict: dict[str, Any]
+) -> None:
+    """If a new billing cycle has started, reset data_dict[month_id]'s usage to zero."""
     if device_gid in DEVICE_INFORMATION:
         device_info: VueDevice = DEVICE_INFORMATION[device_gid]
         local_time: datetime = await change_time_to_local(
@@ -783,9 +790,8 @@ async def check_for_new_month(timestamp: datetime, device_gid: int, month_id: st
             device_info.billing_cycle_start_day,
             True,
         )
-        last_reset = LAST_MONTH_DATA[month_id]["reset"]
-        if current_reset > last_reset:
-            # New billing cycle started
+        last_reset = data_dict[month_id]["reset"]
+        if last_reset is None or current_reset > last_reset:
             _LOGGER.info(
                 "New billing cycle started for id %s! Timestamp is %s, "
                 "current reset is %s, previous reset was %s",
@@ -794,8 +800,8 @@ async def check_for_new_month(timestamp: datetime, device_gid: int, month_id: st
                 current_reset,
                 last_reset,
             )
-            LAST_MONTH_DATA[month_id]["usage"] = 0
-            LAST_MONTH_DATA[month_id]["reset"] = current_reset
+            data_dict[month_id]["usage"] = 0
+            data_dict[month_id]["reset"] = current_reset
 
 
 def determine_reset_datetime(
@@ -806,8 +812,6 @@ def determine_reset_datetime(
         hour=0, minute=0, second=0, microsecond=0
     )
     if is_month:
-        # Month should use the most recent billing_cycle_start_day midnight.
-        # Never return a future reset datetime.
         last_day_this_month = calendar.monthrange(
             reset_datetime.year, reset_datetime.month
         )[1]
@@ -852,12 +856,7 @@ def apply_api_update_debounce(
     existing_data: dict[str, Any],
     scale_name: str,
 ) -> None:
-    """Prevent API reset lag from inflating totals shortly after local reset time.
-
-    During the debounce window after reset, API values may lag and still include prior
-    period usage. In that case, allow API values to lower totals but not raise them
-    above the minute-integrated value already tracked in memory.
-    """
+    """Prevent API reset lag from inflating totals shortly after local reset time."""
     if not updated_data or not existing_data:
         return
 
@@ -907,8 +906,122 @@ def is_in_reset_debounce_window(
 ) -> bool:
     """Return true when local_time is in the reset debounce window for the scale."""
     if scale_name == "month" and local_time.date() != reset_datetime.date():
-        # Monthly debounce only applies on billing-cycle reset date rollover.
         return False
 
     elapsed = local_time - reset_datetime
     return timedelta(0) <= elapsed < timedelta(minutes=debounce_minutes)
+
+
+# --- Mains Import/Export split (see sensor.py: VueMainsSplitSensor) -----------
+#
+# Emporia's API does not provide a native gross Import/Export split for most
+# accounts/hardware. We derive it ourselves from the combined "1,2,3" mains
+# channel:
+#   - At MINUTE scale, a single instant only ever flows one direction, so the
+#     sign of that minute's power value is a reliable, correct split.
+#   - At DAY/MONTH scale, taking the sign of the *period's net total* is NOT
+#     valid (a day with both import and export periods nets out to a
+#     misleading single number). Instead we accumulate minute-by-minute,
+#     adding each minute's usage to the Import or Export running total based
+#     on that minute's sign, and reset the totals at midnight/billing-cycle
+#     start the same way LAST_DAY_DATA/LAST_MONTH_DATA already do.
+#
+# If your account/hardware exposes native "MainsFromGrid"/"MainsToGrid"
+# channels (check the "Unused data found during update" log line), those are
+# a more authoritative source and this derived-split logic can be retired in
+# favor of just reading those channels directly as regular per-channel
+# sensors.
+
+
+def add_minute_mains_split(data: dict[str, Any]) -> None:
+    """Add synthetic Import/Export power entries derived from the combined mains channel.
+
+    Mutates `data` in place. Safe to call unconditionally; only affects
+    devices that have a "1,2,3" combined mains channel entry.
+    """
+    for identifier in list(data.keys()):
+        parts = identifier.split("-")
+        if len(parts) != 3:
+            continue
+        device_gid, channel_num, scale = parts
+        if channel_num != MAINS_COMBINED_CHANNEL_NUM:
+            continue
+        entry = data[identifier]
+        usage = entry.get("usage")
+        if usage is None:
+            continue
+        import_usage = usage if usage > 0 else 0.0
+        export_usage = abs(usage) if usage < 0 else 0.0
+        data[f"{device_gid}-{MAINS_SPLIT_CHANNEL_IMPORT}-{scale}"] = {
+            **entry,
+            "channel_num": MAINS_SPLIT_CHANNEL_IMPORT,
+            "usage": import_usage,
+        }
+        data[f"{device_gid}-{MAINS_SPLIT_CHANNEL_EXPORT}-{scale}"] = {
+            **entry,
+            "channel_num": MAINS_SPLIT_CHANNEL_EXPORT,
+            "usage": export_usage,
+        }
+
+
+async def integrate_mains_split(
+    device_gid: str,
+    minute_entry: dict[str, Any],
+    target: dict[str, Any],
+    is_month: bool,
+) -> None:
+    """Accumulate one minute's combined-mains usage into Import/Export totals in `target`."""
+    usage = minute_entry.get("usage")
+    if usage is None:
+        return
+
+    scale = Scale.MONTH.value if is_month else Scale.DAY.value
+    import_id = f"{device_gid}-{MAINS_SPLIT_CHANNEL_IMPORT}-{scale}"
+    export_id = f"{device_gid}-{MAINS_SPLIT_CHANNEL_EXPORT}-{scale}"
+    timestamp: datetime = minute_entry["timestamp"]
+
+    for key, channel_num in (
+        (import_id, MAINS_SPLIT_CHANNEL_IMPORT),
+        (export_id, MAINS_SPLIT_CHANNEL_EXPORT),
+    ):
+        if key not in target or not target[key]:
+            target[key] = {
+                "device_gid": int(device_gid),
+                "channel_num": channel_num,
+                "usage": 0.0,
+                "scale": scale,
+                "info": DEVICE_INFORMATION.get(int(device_gid)),
+                "reset": None,
+                "timestamp": timestamp,
+            }
+
+    if is_month:
+        await check_for_new_month(timestamp, int(device_gid), import_id, target)
+        await check_for_new_month(timestamp, int(device_gid), export_id, target)
+    else:
+        await check_for_midnight(timestamp, int(device_gid), import_id, target)
+        await check_for_midnight(timestamp, int(device_gid), export_id, target)
+
+    target[import_id]["timestamp"] = timestamp
+    target[export_id]["timestamp"] = timestamp
+
+    if usage > 0:
+        target[import_id]["usage"] += usage
+    elif usage < 0:
+        target[export_id]["usage"] += abs(usage)
+
+
+def carry_forward_mains_split(old_data: dict[str, Any], new_data: dict[str, Any]) -> None:
+    """Copy derived Mains Import/Export entries from old_data into new_data.
+
+    Called after a full API refresh, since the API response never contains
+    these synthetic entries and would otherwise wipe out the running totals.
+    """
+    if not old_data:
+        return
+    for key, value in old_data.items():
+        parts = key.split("-")
+        if len(parts) != 3:
+            continue
+        if parts[1] in MAINS_SPLIT_CHANNELS and key not in new_data:
+            new_data[key] = value
