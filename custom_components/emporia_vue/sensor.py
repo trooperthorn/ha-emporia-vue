@@ -2,6 +2,7 @@
 
 from datetime import datetime
 import logging
+from typing import Any
 
 from pyemvue.device import VueDevice, VueDeviceChannel, ChargerDevice
 from pyemvue.enums import Scale
@@ -20,7 +21,14 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers.event import async_track_state_change_event
 
-from .const import DOMAIN, ENABLE_1D, ENABLE_1M, ENABLE_1MON, MAINS_CHANNEL_NUMS
+from .const import (
+    DOMAIN,
+    ENABLE_1D,
+    ENABLE_1M,
+    ENABLE_1MON,
+    MAINS_CHANNEL_NUMS,
+    MAINS_SPLIT_CHANNELS,
+)
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -32,40 +40,45 @@ async def async_setup_entry(
 ) -> None:
     """Set up the sensor platform."""
     domain_data = hass.data[DOMAIN][config_entry.entry_id]
-    
+
     coordinator_1min = domain_data.get("coordinator_1min")
     coordinator_1mon = domain_data.get("coordinator_1mon")
     coordinator_day_sensor = domain_data.get("coordinator_day_sensor")
     coordinator_device_status = domain_data.get("coordinator_device_status")
     device_information: dict[int, VueDevice] = domain_data.get("device_information", {})
 
-    _LOGGER.info(domain_data)
-
-    # Global configuration flags
     enable_1m = config_entry.data.get(ENABLE_1M, True)
     enable_1d = config_entry.data.get(ENABLE_1D, True)
     enable_1mon = config_entry.data.get(ENABLE_1MON, True)
 
     all_entities = []
 
+    def add_scale_block(coordinator, scale_enabled: bool) -> None:
+        """Create a CurrentVuePowerSensor for every real channel this coordinator has.
 
-    # 1. ADD PER-CHANNEL SENSORS FOR ALL THREE SCALES
-    # Every channel gets a Minute, Day, and Month entity created unconditionally.
-    # ENABLE_1M/1D/1MON only control the entity's default-enabled state in the
-    # registry, EXCEPT for Mains/Grid channels, which are always force-enabled.
-    def add_scale_block(coordinator, scale_enabled: bool):
-        if not coordinator:
+        Every channel is always created. scale_enabled only controls the
+        default-enabled state in the entity registry, EXCEPT Mains channels,
+        which are always force-enabled. Synthetic Mains Import/Export
+        entries are skipped here — they're represented by VueMainsSplitSensor
+        instead, added below.
+        """
+        if not coordinator or not coordinator.data:
             return
         for identifier in coordinator.data:
-            channel_num = str(coordinator.data[identifier].get("channel_num"))
+            entry = coordinator.data[identifier]
+            channel_num = str(entry.get("channel_num"))
+            if channel_num in MAINS_SPLIT_CHANNELS:
+                continue
             is_mains = channel_num in MAINS_CHANNEL_NUMS
             all_entities.append(
                 CurrentVuePowerSensor(
-                    coordinator, identifier,
+                    coordinator,
+                    identifier,
                     force_enabled=is_mains or scale_enabled,
                 )
             )
 
+    # 1. ADD PER-CHANNEL SENSORS FOR ALL THREE SCALES
     add_scale_block(coordinator_1min, enable_1m)
     add_scale_block(coordinator_day_sensor, enable_1d)
     add_scale_block(coordinator_1mon, enable_1mon)
@@ -83,37 +96,34 @@ async def async_setup_entry(
                 all_entities.append(VueMainsSplitSensor(coordinator, device, scale, "Import"))
                 all_entities.append(VueMainsSplitSensor(coordinator, device, scale, "Export"))
 
-    # 4. ADD CHARGER STATUS & CHARGE TIME SENSORS
+    # 3. ADD CHARGER STATUS & CHARGE TIME SENSORS
     if coordinator_device_status and coordinator_device_status.data:
         soc_sensor = config_entry.options.get("vehicle_soc_sensor")
-        
+
         for gid in coordinator_device_status.data:
             if int(gid) in device_information and device_information[int(gid)].ev_charger:
                 device_obj = device_information[int(gid)]
-                
-                # Add charge time calculation sensor only if option is configured
+
                 if soc_sensor and isinstance(soc_sensor, str) and soc_sensor.strip():
                     all_entities.append(
                         EmporiaEVChargeTimeNeededSensor(hass, config_entry, device_obj)
                     )
-                
-                # Add charger status sensor
+
                 all_entities.append(
                     EmporiaChargerStatusSensor(coordinator_device_status, device_obj)
                 )
 
-    # Register all collected entities at once
     async_add_entities(all_entities)
 
-    # 5. CLEAN UP / DISABLE DEVICES WITH ZERO ENTITIES
+    # 4. CLEAN UP / DISABLE DEVICES WITH ZERO ENTITIES
     active_device_gids = {
-        getattr(entity, "_device_gid", None) 
-        for entity in all_entities 
+        getattr(entity, "_device_gid", None)
+        for entity in all_entities
         if hasattr(entity, "_device_gid") and entity._device_gid is not None
     }
 
     device_registry = dr.async_get(hass)
-    
+
     for dev_entry in dr.async_entries_for_config_entry(device_registry, config_entry.entry_id):
         dev_gid = None
         for domain_name, identifier in dev_entry.identifiers:
@@ -122,14 +132,14 @@ async def async_setup_entry(
                     dev_gid = int(identifier)
                 except ValueError:
                     pass
-        
-        # If the device has no active entities created, disable it in the registry
+
         if dev_gid and dev_gid not in active_device_gids:
             if not dev_entry.disabled_by:
                 device_registry.async_update_device(
                     dev_entry.id,
-                    disabled_by=dr.DeviceEntryDisabler.INTEGRATION, # <-- Correct
+                    disabled_by=dr.DeviceEntryDisabler.INTEGRATION,
                 )
+
 
 class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
     """Representation of a Vue Sensor's current power."""
@@ -143,10 +153,9 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
         channel_num: str = coordinator.data[identifier]["channel_num"]
         self._device: VueDevice = coordinator.data[identifier]["info"]
 
-        # Enabled by default only if this scale/channel combination is
-        # supposed to be on (force_enabled, which is True for Mains channels
-        # regardless of the user's Minute/Day/Month option) AND we actually
-        # have usage data for it.
+        # Enabled by default only if this scale/channel is supposed to be on
+        # (force_enabled, always True for Mains channels regardless of the
+        # user's Minute/Day/Month option) AND we actually have usage data.
         initial_usage = coordinator.data[identifier].get("usage")
         self._attr_entity_registry_enabled_default = (
             force_enabled and initial_usage is not None
@@ -170,21 +179,12 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
         self._channel: VueDeviceChannel = final_channel
         self._iskwh = self.scale_is_energy()
 
-        # Add Device Registry Grouping
-        # Groups all entities under their parent hardware device in HA
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, str(device_gid))},
-            name=self._device.device_name or f"Emporia Vue {device_gid}",
-            manufacturer="Emporia",
-            model=self._device.model,
-        )
-
         self._attr_has_entity_name = True
 
         if self._iskwh:
             self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
             self._attr_device_class = SensorDeviceClass.ENERGY
-            self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+            self._attr_state_class = SensorStateClass.TOTAL
             self._attr_suggested_display_precision = 3
             self._attr_name = f"Energy {self.scale_readable()}"
         else:
@@ -194,9 +194,8 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
             self._attr_suggested_display_precision = 1
             self._attr_name = f"Power {self.scale_readable()}"
 
-    # 3. Add Custom Attributes for Scripting and Templating
     @property
-    def extra_state_attributes(self) -> dict[str, any]:
+    def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes of the sensor."""
         return {
             "channel_num": self._channel.channel_num,
@@ -208,30 +207,35 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
 
     @property
     def device_info(self) -> DeviceInfo:
-    """Return the device info."""
-    if self._channel.channel_num in MAINS_CHANNEL_NUMS:
-        # Group Mains/aggregate channels with the parent monitor device,
-        # alongside the Balance/Grid Import/Export sensors.
+        """Return the device info."""
+        if self._channel.channel_num in MAINS_CHANNEL_NUMS:
+            # Group Mains/aggregate channels with the parent monitor device,
+            # alongside the Balance/Grid Import/Export sensors, instead of
+            # creating a separate per-channel device for them.
+            return DeviceInfo(
+                identifiers={(DOMAIN, str(self._device.device_gid))},
+                name=self._device.device_name or f"Emporia Vue {self._device.device_gid}",
+                model=self._device.model,
+                sw_version=self._device.firmware,
+                manufacturer="Emporia",
+            )
+        device_name = self._channel.name
+        if not device_name:
+            if self._channel.channel_num.isdigit():
+                device_name = (
+                    f"{self._device.device_name} Circuit {self._channel.channel_num}"
+                )
+            else:
+                device_name = self._device.device_name
         return DeviceInfo(
-            identifiers={(DOMAIN, str(self._device.device_gid))},
-            name=self._device.device_name or f"Emporia Vue {self._device.device_gid}",
+            identifiers={
+                (DOMAIN, f"{self._device.device_gid}-{self._channel.channel_num}")
+            },
+            name=device_name,
             model=self._device.model,
             sw_version=self._device.firmware,
             manufacturer="Emporia",
         )
-    device_name = self._channel.name
-    if not device_name:
-        if self._channel.channel_num.isdigit():
-            device_name = f"{self._device.device_name} Circuit {self._channel.channel_num}"
-        else:
-            device_name = self._device.device_name
-    return DeviceInfo(
-        identifiers={(DOMAIN, f"{self._device.device_gid}-{self._channel.channel_num}")},
-        name=device_name,
-        model=self._device.model,
-        sw_version=self._device.firmware,
-        manufacturer="Emporia",
-    )
 
     @property
     def native_value(self) -> float | None:
@@ -258,19 +262,17 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
     def last_reset(self):
         """Return the time when the sensor was last reset, if any."""
         if self._iskwh and self.coordinator.data and self._id in self.coordinator.data:
-            return self.coordinator.data[self._id].get("last_reset")
+            return self.coordinator.data[self._id].get("reset")
         return None
 
     def scale_usage(self, usage):
         """Scales the usage to the correct timescale and magnitude."""
         if self._scale == Scale.MINUTE.value:
-            usage = 60 * 1000 * usage  # convert from kwh to w rate
+            usage = 60 * 1000 * usage
         elif self._scale == Scale.SECOND.value:
-            usage = 3600 * 1000 * usage  # convert to rate
+            usage = 3600 * 1000 * usage
         elif self._scale == Scale.MINUTES_15.value:
-            usage = (
-                4 * 1000 * usage
-            )  # this might never be used but for safety, convert to rate
+            usage = 4 * 1000 * usage
         return usage
 
     def scale_is_energy(self):
@@ -292,32 +294,22 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
         return self._scale
 
 
-# Known Emporia charger API responses (from historical data):
-#   Status: "Charging", "Standby", "DeviceNotConnected", ""
-#   Messages: "Charging", "Ready", "Off", "Self Test", "Offline",
-#             "EV is not accepting charge", "Connected to EV",
-#             "Please Wait", "Charging Halted", ""
-
 def _map_charger_state(status: str | None, message: str | None, fault_text: str | None) -> tuple[str, str]:
     """Map Emporia charger status/message to a human-friendly state and IEC 61851 code."""
     status_lower = (status or "").lower()
     message_lower = (message or "").lower()
     fault = (fault_text or "").strip()
 
-    # F: Fault condition
     if fault or "error" in status_lower or "fault" in status_lower or "error" in message_lower or "fault" in message_lower:
         return "Error", "F"
-    # C: Actively charging
     if status_lower == "charging":
         return "Charging", "C"
-    # A: Disconnected -  no EV present or device offline
     if not status_lower:
         return "Disconnected", "A"
     if status_lower == "devicenotconnected":
         return "Disconnected", "A"
     if status_lower == "standby" and message_lower in ("ready", "off", "self test", "please wait"):
         return "Disconnected", "A"
-    # B: Connected but not charging (default for unknown/unmapped states)
     if status_lower != "standby":
         _LOGGER.debug(
             "Unmapped charger state: status=%s, message=%s", status, message
@@ -326,6 +318,7 @@ def _map_charger_state(status: str | None, message: str | None, fault_text: str 
 
 
 CHARGER_STATUS_OPTIONS = ["Disconnected", "Connected", "Charging", "Error"]
+
 
 class EmporiaChargerStatusSensor(CoordinatorEntity, SensorEntity):  # type: ignore
     """Representation of an Emporia Charger status sensor."""
@@ -381,6 +374,7 @@ class EmporiaChargerStatusSensor(CoordinatorEntity, SensorEntity):  # type: igno
             manufacturer="Emporia",
         )
 
+
 class VueBalanceSensor(CoordinatorEntity, SensorEntity):
     """Representation of a dynamically calculated Unmonitored Balance sensor."""
 
@@ -394,21 +388,19 @@ class VueBalanceSensor(CoordinatorEntity, SensorEntity):
         self._attr_has_entity_name = True
         self._attr_unique_id = f"vue_balance_{self._device_gid}_{scale}"
 
-        # Group this sensor with the physical Vue monitor in the HA UI
         self._attr_device_info = DeviceInfo(
-            identifiers={("emporia_vue", str(self._device_gid))},
+            identifiers={(DOMAIN, str(self._device_gid))},
             name=self._device.device_name or f"Emporia Vue {self._device_gid}",
             manufacturer="Emporia",
             model=self._device.model,
         )
 
-        # Determine if we are measuring Power (1MIN) or Energy (1D/1MON)
         self._iskwh = scale not in ["1S", "1MIN"]
 
         if self._iskwh:
             self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
             self._attr_device_class = SensorDeviceClass.ENERGY
-            self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+            self._attr_state_class = SensorStateClass.TOTAL
             self._attr_suggested_display_precision = 3
             self._attr_name = f"Balance Energy ({scale})"
         else:
@@ -426,68 +418,78 @@ class VueBalanceSensor(CoordinatorEntity, SensorEntity):
 
         mains_usage = 0.0
         branch_usage = 0.0
+        reset_ts = None
 
-        # Scan the coordinator data for THIS specific device and scale
         for identifier, data in self.coordinator.data.items():
-            if data.get("device_gid") == self._device_gid and data.get("scale") == self._scale:
-                usage = data.get("usage")
-                if usage is None:
-                    continue
+            if data.get("device_gid") != self._device_gid or data.get("scale") != self._scale:
+                continue
+            channel_num = str(data.get("channel_num"))
+            if channel_num in MAINS_SPLIT_CHANNELS:
+                # Derived Import/Export entries — not part of the raw
+                # Mains-minus-branches calculation.
+                continue
 
-                channel_num = str(data.get("channel_num"))
+            usage = data.get("usage")
+            if usage is None:
+                continue
 
-                # Emporia Gen 2/3 hardware uses 1, 2, 3 (or "1,2,3") for Mains CTs.
-                # All branch circuits are channel 4 and above.
-                if channel_num in ["1", "2", "3", "1,2,3"]:
-                    mains_usage += usage
-                elif channel_num.isdigit() and int(channel_num) >= 4:
-                    branch_usage += usage
+            if channel_num in ("1", "2", "3", "1,2,3"):
+                mains_usage += usage
+                reset_ts = data.get("reset") or reset_ts
+            elif channel_num.isdigit() and int(channel_num) >= 4:
+                branch_usage += usage
 
-        # Calculate balance. 
         balance = mains_usage - branch_usage
-
-        # Due to slight analog inaccuracies in CT clamps, the sum of branches 
-        # can occasionally exceed the mains by a tiny fraction, resulting in a negative number.
-        # The Emporia app floors this at 0, so we should do the same to prevent UI artifacts.
         return max(balance, 0.0)
 
     @property
-    def extra_state_attributes(self) -> dict[str, any]:
+    def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes."""
         return {
             "device_gid": self._device_gid,
             "scale": self._scale,
             "description": "Calculated: Total Mains minus Sum of Branch Circuits",
         }
+
     @property
     def last_reset(self):
         """Return the time when the sensor was last reset, if any."""
         if not self._iskwh or not self.coordinator.data:
             return None
-            
+
         for identifier, data in self.coordinator.data.items():
             if data.get("device_gid") == self._device_gid and data.get("scale") == self._scale:
-                return data.get("last_reset")
+                channel_num = str(data.get("channel_num"))
+                if channel_num in ("1", "2", "3", "1,2,3"):
+                    return data.get("reset")
         return None
 
 
 class VueMainsSplitSensor(CoordinatorEntity, SensorEntity):
-    """Representation of calculated Grid Import or Export sensors."""
+    """Representation of the Grid Import or Export sensor.
 
-    def __init__(self, coordinator, device, scale: str, direction: str) -> None:
+    Reads a pre-computed value from coordinator data (see
+    add_minute_mains_split / integrate_mains_split in __init__.py) rather
+    than deriving it from a period-net sign, which is only valid for
+    instantaneous (Minute) power, not for Day/Month energy totals.
+    """
+
+    def __init__(self, coordinator, device: VueDevice, scale: str, direction: str) -> None:
         """Initialize the split mains sensor."""
         super().__init__(coordinator)
         self._device = device
         self._scale = scale
         self._device_gid = device.device_gid
-        # Direction is either "Import" or "Export"
-        self._direction = direction 
+        self._direction = direction
+
+        channel_num = "MainsImport" if direction == "Import" else "MainsExport"
+        self._id = f"{self._device_gid}-{channel_num}-{scale}"
 
         self._attr_has_entity_name = True
         self._attr_unique_id = f"vue_mains_{self._direction.lower()}_{self._device_gid}_{scale}"
 
         self._attr_device_info = DeviceInfo(
-            identifiers={("emporia_vue", str(self._device_gid))},
+            identifiers={(DOMAIN, str(self._device_gid))},
             name=self._device.device_name or f"Emporia Vue {self._device_gid}",
             manufacturer="Emporia",
             model=self._device.model,
@@ -510,41 +512,30 @@ class VueMainsSplitSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self) -> float | None:
-        """Calculate the Import or Export dynamically."""
-        if not self.coordinator.data:
-            return None
-
-        mains_usage = 0.0
-        mains_found = False
-
-        # Sum up the Mains channels (1, 2, and 3)
-        for identifier, data in self.coordinator.data.items():
-            if data.get("device_gid") == self._device_gid and data.get("scale") == self._scale:
-                usage = data.get("usage")
-                if usage is None:
-                    continue
-
-                channel_num = str(data.get("channel_num"))
-                if channel_num in ["1", "2", "3", "1,2,3"]:
-                    mains_usage += usage
-                    mains_found = True
-
-        if not mains_found:
-            return None
-
-        # Return strictly positive values based on the direction requested
-        if self._direction == "Import":
-            return mains_usage if mains_usage > 0 else 0.0
-        elif self._direction == "Export":
-            return abs(mains_usage) if mains_usage < 0 else 0.0
+        """Return the pre-computed Import/Export value for this scale."""
+        entry = self.coordinator.data.get(self._id) if self.coordinator.data else None
+        if not entry:
+            # Not yet accumulated for this period — 0 for energy totals,
+            # unknown for instantaneous power.
+            return 0.0 if self._iskwh else None
+        return entry.get("usage")
 
     @property
-    def extra_state_attributes(self) -> dict[str, any]:
+    def last_reset(self):
+        """Return the time when this total was last reset, if any."""
+        if not self._iskwh or not self.coordinator.data:
+            return None
+        entry = self.coordinator.data.get(self._id)
+        return entry.get("reset") if entry else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
         return {
             "device_gid": self._device_gid,
             "scale": self._scale,
-            "description": f"Calculated: {self._direction} from Mains CTs",
+            "description": f"Accumulated {self._direction} from the combined Mains channel",
         }
+
 
 class EmporiaEVChargeTimeNeededSensor(SensorEntity):
     """Representation of calculated EV Charge Time Needed."""
@@ -560,9 +551,12 @@ class EmporiaEVChargeTimeNeededSensor(SensorEntity):
         self._config_entry = config_entry
         self._charger_device = charger_device
         self._device_gid = charger_device.device_gid
-        
+
         self._attr_unique_id = f"emporia_vue_ev_charge_time_needed_{self._device_gid}"
-        
+
+        # Matches the device identifier used by EmporiaChargerEntity
+        # (switch.py / number.py) so this sensor groups with the charger's
+        # switch/status/current-limit entities instead of a separate device.
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"{self._device_gid}-1,2,3")},
             name=self._charger_device.device_name or f"Emporia Vue {self._device_gid}",
@@ -573,10 +567,9 @@ class EmporiaEVChargeTimeNeededSensor(SensorEntity):
     async def async_added_to_hass(self) -> None:
         """Subscribe to vehicle battery sensor state changes."""
         await super().async_added_to_hass()
-        
+
         vehicle_soc_sensor = self._config_entry.options.get("vehicle_soc_sensor")
         if vehicle_soc_sensor:
-            # Re-evaluate calculation whenever the vehicle SoC sensor changes
             self.async_on_remove(
                 async_track_state_change_event(
                     self.hass, [vehicle_soc_sensor], self._async_on_soc_update
@@ -605,12 +598,10 @@ class EmporiaEVChargeTimeNeededSensor(SensorEntity):
         except ValueError:
             return None
 
-        # 1. Energy Needed
         target_soc = 100.0
         percent_needed = max(target_soc - current_soc, 0.0)
         kwh_needed = (percent_needed / 100.0) * battery_capacity
 
-        # 2. Get current charger rate from HA state (default to 40A @ 240V if missing)
         amps_entity = f"number.emporia_vue_charger_current_{self._device_gid}"
         amps_state = self.hass.states.get(amps_entity)
         amps = float(amps_state.state) if amps_state and amps_state.state.replace('.', '', 1).isdigit() else 40.0
@@ -620,6 +611,5 @@ class EmporiaEVChargeTimeNeededSensor(SensorEntity):
         if charge_rate_kw <= 0:
             return 0.0
 
-        # 3. Hours needed (with 10% charging loss buffer)
         hours_needed = (kwh_needed / charge_rate_kw) * 1.1
         return round(hours_needed, 2)
