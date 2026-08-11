@@ -229,6 +229,13 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
             f"{self._channel.device_gid}-{self._channel.channel_num}"
         )
 
+    @property
+    def last_reset(self):
+        """Return the time when the sensor was last reset, if any."""
+        if self._iskwh and self.coordinator.data and self._id in self.coordinator.data:
+            return self.coordinator.data[self._id].get("last_reset")
+        return None
+
     def scale_usage(self, usage):
         """Scales the usage to the correct timescale and magnitude."""
         if self._scale == Scale.MINUTE.value:
@@ -427,6 +434,17 @@ class VueBalanceSensor(CoordinatorEntity, SensorEntity):
             "scale": self._scale,
             "description": "Calculated: Total Mains minus Sum of Branch Circuits",
         }
+    @property
+    def last_reset(self):
+        """Return the time when the sensor was last reset, if any."""
+        if not self._iskwh or not self.coordinator.data:
+            return None
+            
+        for identifier, data in self.coordinator.data.items():
+            if data.get("device_gid") == self._device_gid and data.get("scale") == self._scale:
+                return data.get("last_reset")
+        return None
+
 
 class VueMainsSplitSensor(CoordinatorEntity, SensorEntity):
     """Representation of calculated Grid Import or Export sensors."""
@@ -455,7 +473,7 @@ class VueMainsSplitSensor(CoordinatorEntity, SensorEntity):
         if self._iskwh:
             self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
             self._attr_device_class = SensorDeviceClass.ENERGY
-            self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+            self._attr_state_class = SensorStateClass.TOTAL
             self._attr_suggested_display_precision = 3
             self._attr_name = f"Grid {self._direction} Energy ({scale})"
         else:
