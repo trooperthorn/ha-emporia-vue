@@ -1,11 +1,12 @@
 """Config flow for Emporia Vue integration."""
-import requests
+
 import asyncio
 from collections.abc import Mapping
 from functools import partial
 import logging
 from typing import Any
 
+import requests
 import voluptuous as vol
 
 from homeassistant import config_entries, exceptions
@@ -55,47 +56,51 @@ class VueHub:
 
     def __init__(self, hass: HomeAssistant) -> None:
         """Initialize the hub."""
-        # --- LAZY IMPORT ---
         from pyemvue import PyEmVue
-        
+
         self.hass = hass
         self.vue = PyEmVue()
 
     async def authenticate(self, data: dict[str, Any] | Mapping[str, Any]) -> bool:
-    """Test if we can authenticate with the host."""
-    auth_method = data.get(AUTH_METHOD, AUTH_METHOD_EMAIL_PASSWORD)
+        """Test if we can authenticate with the host.
 
-    try:
-        if auth_method == AUTH_METHOD_TOKENS:
-            return await self.hass.async_add_executor_job(
-                partial(
-                    self.vue.login,
-                    id_token=data[CONF_ID_TOKEN],
-                    access_token=data[CONF_ACCESS_TOKEN],
-                    refresh_token=data[CONF_REFRESH_TOKEN],
+        Raises CannotConnect on a network/connection failure so the caller
+        can distinguish that from a genuine credential rejection (which
+        returns False).
+        """
+        auth_method = data.get(AUTH_METHOD, AUTH_METHOD_EMAIL_PASSWORD)
+
+        try:
+            if auth_method == AUTH_METHOD_TOKENS:
+                return await self.hass.async_add_executor_job(
+                    partial(
+                        self.vue.login,
+                        id_token=data[CONF_ID_TOKEN],
+                        access_token=data[CONF_ACCESS_TOKEN],
+                        refresh_token=data[CONF_REFRESH_TOKEN],
+                    )
                 )
-            )
 
-        username = data[CONF_EMAIL]
-        password = data[CONF_PASSWORD]
+            username = data[CONF_EMAIL]
+            password = data[CONF_PASSWORD]
 
-        if username.startswith("vue_simulator@"):
-            host = username.split("@")[1]
+            if username.startswith("vue_simulator@"):
+                host = username.split("@")[1]
+                return await self.hass.async_add_executor_job(
+                    self.vue.login_simulator, host
+                )
+
             return await self.hass.async_add_executor_job(
-                self.vue.login_simulator, host
+                self.vue.login, username, password
             )
 
-        return await self.hass.async_add_executor_job(
-            self.vue.login, username, password
-        )
-
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as err:
-        _LOGGER.warning("Could not reach Emporia servers: %s", err)
-        raise CannotConnect from err
-    except Exception as err:  # pylint: disable=broad-except
-        # Genuine auth rejection (bad password, invalid token, etc.)
-        _LOGGER.debug("Emporia Vue authentication failed: %s", err)
-        return False
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as err:
+            _LOGGER.warning("Could not reach Emporia servers: %s", err)
+            raise CannotConnect from err
+        except Exception as err:  # pylint: disable=broad-except
+            # Genuine auth rejection (bad password, invalid/expired token, etc.)
+            _LOGGER.debug("Emporia Vue authentication failed: %s", err)
+            return False
 
 
 async def validate_input(
@@ -105,7 +110,6 @@ async def validate_input(
 
     Data has the keys from DATA_SCHEMA with values provided by the user.
     """
-
     hub = VueHub(hass)
     if not await hub.authenticate(data):
         raise InvalidAuth
@@ -120,7 +124,6 @@ async def validate_input(
     if AUTH_METHOD not in new_data:
         new_data[AUTH_METHOD] = AUTH_METHOD_EMAIL_PASSWORD
 
-    # Return info that you want to store in the config entry.
     entry_data = {
         CONFIG_TITLE: f"{hub.vue.customer.email} ({hub.vue.customer.customer_gid})",
         CUSTOMER_GID: f"{hub.vue.customer.customer_gid}",
@@ -186,7 +189,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             try:
                 user_input[AUTH_METHOD] = AUTH_METHOD_EMAIL_PASSWORD
                 info = await validate_input(self.hass, user_input)
-                # prevent setting up the same account twice
                 await self.async_set_unique_id(info[CUSTOMER_GID])
                 self._abort_if_unique_id_configured()
 
@@ -214,8 +216,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             try:
                 user_input[AUTH_METHOD] = AUTH_METHOD_TOKENS
                 info = await validate_input(self.hass, user_input)
-                
-                # prevent setting up the same account twice
+
                 await self.async_set_unique_id(info[CUSTOMER_GID])
                 self._abort_if_unique_id_configured()
 
@@ -252,7 +253,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 redact_config_data(current_config.data),
             )
             info = current_config.data
-            # if gid is not in current config, reauth and get gid again
             if (
                 CUSTOMER_GID not in current_config.data
                 or not current_config.data[CUSTOMER_GID]
@@ -317,6 +317,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 reauth_data.update(user_input)
                 reauth_data[AUTH_METHOD] = auth_method
                 info = await validate_input(self.hass, reauth_data)
+            except CannotConnect:
+                errors["base"] = "cannot_connect"
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
             else:
