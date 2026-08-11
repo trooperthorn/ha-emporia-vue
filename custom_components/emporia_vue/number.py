@@ -11,7 +11,6 @@ from homeassistant.components.number import (
     NumberEntity,
     NumberMode,
 )
-from homeassistant.components.number import NumberMode
 from homeassistant.exceptions import HomeAssistantError
 
 from homeassistant.config_entries import ConfigEntry
@@ -130,6 +129,11 @@ class EmporiaChargerCurrentNumber(EmporiaChargerEntity, NumberEntity):  # type: 
                 f"Failed to set Emporia charger current: {err}"
             ) from err
         finally:
-            # 5. Clear optimistic state override so entity relies on live coordinator data
-            self._optimistic_value = None
+        finally:
+            # Only clear the optimistic override once the coordinator's data
+            # actually agrees with what we set — otherwise keep showing the
+            # optimistic value until the next successful refresh catches up.
+            data = self.coordinator.data.get(self._device_gid)
+            if data and float(data.charging_rate) == self._optimistic_value:
+                self._optimistic_value = None
             self.async_write_ha_state()
