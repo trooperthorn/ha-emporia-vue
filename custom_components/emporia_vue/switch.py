@@ -118,14 +118,6 @@ class EmporiaOutletSwitch(CoordinatorEntity, SwitchEntity):  # type: ignore
         """Unique ID for the switch."""
         return f"switch.emporia_vue.{self._device_gid}"
 
-    def turn_on(self, **kwargs: Any) -> None:
-        """Turn the switch on."""
-        raise NotImplementedError
-
-    def turn_off(self, **kwargs: Any) -> None:
-        """Turn the switch off."""
-        raise NotImplementedError
-
 
 class EmporiaChargerSwitch(EmporiaChargerEntity, SwitchEntity):  # type: ignore
     """Representation of an Emporia Charger switch state."""
@@ -144,28 +136,20 @@ class EmporiaChargerSwitch(EmporiaChargerEntity, SwitchEntity):  # type: ignore
         return self.coordinator.data[self._device_gid].charger_on
 
     async def _update_switch(self, on: bool) -> None:
-    """Update the switch."""
-    charger = self.coordinator.data[self._device_gid]
-    try:
-        await self.hass.async_add_executor_job(
-            self._vue.update_charger,
-            charger,
-            on,
-            charger.charging_rate,  # preserve the currently-set current
-        )
-    except exceptions.HTTPError as err:
-        _LOGGER.error(
-            "Error updating charger status: %s \nResponse body: %s",
-            err,
-            err.response.text,
-        )
-        raise
-    await self.coordinator.async_request_refresh()
-
-    def turn_on(self, **kwargs: Any) -> None:
-        """Turn the charger on."""
-        raise NotImplementedError
-
-    def turn_off(self, **kwargs: Any) -> None:
-        """Turn the charger off."""
-        raise NotImplementedError
+        """Update the switch, preserving the currently-set charging current."""
+        charger = self.coordinator.data[self._device_gid]
+        try:
+            await self.hass.async_add_executor_job(
+                self._vue.update_charger,
+                charger,
+                on,
+                charger.charging_rate,
+            )
+        except exceptions.HTTPError as err:
+            _LOGGER.error(
+                "Error updating charger status: %s \nResponse body: %s",
+                err,
+                err.response.text,
+            )
+            raise
+        await self.coordinator.async_request_refresh()
