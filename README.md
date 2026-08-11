@@ -55,6 +55,8 @@ Configuration is done directly in the Home Assistant UI, no manual config file e
 5. In the UI that opens, enter the email and password used for the Emporia App. If your account uses Google/Apple, see the [Google/Apple Accounts](#googleapple-accounts) section below.
 6. Done! You should now have a sensor for each "channel".
 
+   
+
 ### Google/Apple Accounts
 
 If your Emporia account was created via Sign in with Google or Apple, the easiest solution is to **set an Emporia password** using the create account flow on the Emporia website or app using the same email address as you'd use with Google/Apple. Once set, you can log in using the standard email and password method above.
@@ -65,3 +67,43 @@ If you are unable to set a password, the integration also supports token-based a
 2. Open your browser's Developer Tools (F12) and go to the **Application** tab (Chrome/Edge) or **Storage** tab (Firefox).
 3. Under **IndexedDB** → **com.amplify.awsCognitoAuthPlugin** → **default.store**, look for keys ending in `.hostedUi.idToken`, `.hostedUi.accessToken`, and `.hostedUi.refreshToken` - copy the values of all three, making sure to only keep the values within the quotes (should start with `eyJ` or similar)
 4. Use those values in the token authentication step of the integration setup.
+
+
+
+## 📊 Configuring the Home Assistant Energy Dashboard
+
+To ensure the Home Assistant Energy Dashboard calculates costs, solar offset, and individual device consumption accurately, you must map the specific sensors created by this integration to their correct logical categories in Home Assistant (**Settings** > **Dashboards** > **Energy**).
+
+### ⚡ Electricity Grid
+This section tracks the power crossing your physical utility meter. If you have solar panels, you **must** use the split, strictly positive sensors. Do not use the raw "Mains" sensors here, as the Energy Dashboard cannot process negative numbers.
+
+* **Grid Consumption:** Add `Grid Import Energy (1D)`.
+  * *Tip:* Check "Use an entity with current price" or "Use a static price" to track your utility costs.
+* **Return to Grid:** Add `Grid Export Energy (1D)`.
+  * *Tip:* Enter your utility's net-metering buyback rate here to calculate your offset.
+
+### ☀️ Solar Panels
+This section tracks total solar production before it is consumed by your house or sent to the grid.
+
+* **Solar Production:** Add the Emporia channel connected to your solar inverter (e.g., `Solar Energy (1D)` or `Channel 4 Energy (1D)`).
+  * *Important Note:* Depending on how your CT clamps are physically installed, Emporia might report this as a negative number. If so, ensure the **Solar Invert** option is checked in the integration's configuration settings so Home Assistant receives a positive value.
+
+### 🔋 Home Battery Storage
+*Only use this section if you have a physical home battery system (e.g., Tesla Powerwall, Enphase IQ) monitored by CT clamps. Do not put your EV charger here.*
+
+* **Energy going into the battery:** Add the sensor tracking power flowing to the battery circuit.
+* **Energy coming out of the battery:** Add the sensor tracking power discharging from the battery to the house.
+
+### 🔌 Individual Devices
+This section breaks down where the power consumed by your house is actually going. This is where you map your Emporia branch circuits.
+
+* **Add Devices:** Select your specific branch circuits (e.g., `EV Charger Energy (1D)`, `HVAC Energy (1D)`, `Water Heater Energy (1D)`).
+* **The Unmonitored Balance:** You should also add the `Balance Energy (1D)` sensor. This shows up as a distinct slice of your pie chart, showing exactly how much power is being consumed by wall outlets, lights, and appliances not actively monitored by a dedicated CT clamp.
+
+---
+
+### ⚠️ Critical Setup Rules
+
+1. **Always use the `(1D)` sensors:** The Energy Dashboard requires sensors that track total accumulated energy over time (kWh). If you attempt to use the `(1MIN)` power (Watt) sensors, the dashboard will reject them.
+2. **Wait 2 Hours:** Home Assistant’s Long-Term Statistics engine only compiles Energy Dashboard data once an hour. After configuring this, the dashboard will remain blank or show incomplete data for up to two hours while the database builds its first baseline.
+3. **Do not duplicate Mains:** Never add the raw Mains sensors to the "Individual Devices" list. Home Assistant automatically calculates your total home consumption mathematically (`Grid Import` + `Solar Production` - `Grid Export`). If you add Mains to the device list, your dashboard will double-count your entire house's consumption.
