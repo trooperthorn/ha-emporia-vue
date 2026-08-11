@@ -1,4 +1,37 @@
-# ... (blueprint header from above goes here) ...
+blueprint:
+  name: "EV Charging: Smart Travel Prompt"
+  description: "Sends an actionable notification when the EV is plugged in, adjusting options based on upcoming calendar travel."
+  domain: automation
+  input:
+    charger_status:
+      name: EV Charger Status Sensor
+      description: "The sensor that reads Connected or Charging."
+      selector:
+        entity:
+          domain: sensor
+    charger_switch:
+      name: EV Charger Switch
+      description: "The switch to pause or resume charging."
+      selector:
+        entity:
+          domain: switch
+    charger_amps:
+      name: EV Amperage Control
+      description: "The number entity that sets the charge speed."
+      selector:
+        entity:
+          domain: number
+    calendar_entity:
+      name: Travel Calendar
+      description: "The calendar to check for upcoming trips."
+      selector:
+        entity:
+          domain: calendar
+    notify_service:
+      name: Notification Service
+      description: "Your phone's notify service (e.g., notify.mobile_app_pixel_8)"
+      selector:
+        text: {}
 
 mode: restart
 trigger:
