@@ -96,9 +96,20 @@ async def async_setup_entry(
         )
 
     # 4. ADD CHARGER STATUS SENSORS
-    coordinator_device_status = hass.data[DOMAIN][config_entry.entry_id][
-        "coordinator_device_status"
-    ]
+    if coordinator_device_status and coordinator_device_status.data:
+        # Check if the user actively configured a valid vehicle SoC entity
+        soc_sensor = config_entry.options.get("vehicle_soc_sensor")
+        
+        if soc_sensor and isinstance(soc_sensor, str) and soc_sensor.strip():
+            async_add_entities(
+                [
+                    EmporiaEVChargeTimeNeededSensor(
+                        hass, config_entry, device_information[int(gid)]
+                    )
+                    for gid in coordinator_device_status.data
+                    if int(gid) in device_information and device_information[int(gid)].ev_charger
+                ]
+            )
     
     if coordinator_device_status and coordinator_device_status.data:
         async_add_entities(
