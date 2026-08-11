@@ -20,6 +20,10 @@ ENABLE_1MON = "enable_1mon"
 SOLAR_INVERT = "solar_invert"
 CUSTOMER_GID = "customer_gid"
 CONFIG_TITLE = "title"
+# Channel numbers that represent the physical Mains/Grid CTs on a Vue unit,
+# rather than a monitored branch circuit. These sensors must always be
+# created and always default-enabled regardless of ENABLE_1M/1D/1MON.
+MAINS_CHANNEL_NUMS = frozenset({"1", "2", "3", "1,2,3", "Balance", "MainsFromGrid", "MainsToGrid"})
 
 AUTH_METHOD_SCHEMA = vol.Schema(
     {
