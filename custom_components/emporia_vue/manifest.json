@@ -1,12 +1,12 @@
 {
   "domain": "emporia_vue",
   "name": "Emporia Vue",
-  "codeowners": ["@magico13"],
+  "codeowners": ["@trooperthorn"],
   "config_flow": true,
-  "documentation": "https://github.com/magico13/ha-emporia-vue",
+  "documentation": "https://github.com/trooperthorn/ha-emporia-vue",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/magico13/ha-emporia-vue/issues",
+  "issue_tracker": "https://github.com/trooperthorn/ha-emporia-vue/issues",
   "requirements": ["pyemvue==0.18.9", "boto3>=1.37.1,<1.43.0"],
   "single_config_entry": true,
   "version": "0.12.3"
