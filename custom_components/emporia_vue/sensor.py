@@ -15,7 +15,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers.entity_registry import RegistryEntryDisabling
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -127,7 +126,7 @@ async def async_setup_entry(
             if not dev_entry.disabled_by:
                 device_registry.async_update_device(
                     dev_entry.id,
-                    disabled_by=dr.DeviceEntryDisabling.INTEGRATION,
+                    disabled_by=dr.DeviceEntryDisabler.INTEGRATION, # <-- Correct
                 )
 
 class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
