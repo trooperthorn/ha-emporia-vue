@@ -209,13 +209,6 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
         )
 
     @property
-    def last_reset(self) -> datetime | None:
-        """Reset time of the daily/monthly sensor. Midnight local time."""
-        if self._id in self.coordinator.data:
-            return self.coordinator.data[self._id]["reset"]
-        return None
-
-    @property
     def native_value(self) -> float | None:
         """Return the state of the sensor."""
         if self._id in self.coordinator.data:
