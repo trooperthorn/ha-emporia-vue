@@ -1,0 +1,101 @@
+# ... (blueprint header from above goes here) ...
+
+mode: restart
+trigger:
+  - platform: state
+    entity_id: !input charger_status
+    to: "Connected"
+action:
+  # 1. Fetch calendar events
+  - action: calendar.get_events
+    data:
+      duration:
+        hours: 48
+    target:
+      entity_id: !input calendar_entity
+    response_variable: agenda
+
+  # 2. Check for travel keywords
+  - variables:
+      # We use the raw input string to filter the correct calendar in the agenda response
+      cal: !input calendar_entity
+      travel_upcoming: >
+        {{ agenda[cal].events | selectattr('summary', 'match', '(?i)travel|flight|trip|drive|airport') | list | length > 0 }}
+
+  # 3. Send the notification
+  - action: !input notify_service
+    data:
+      title: "EV Plugged In ⚡"
+      message: >
+        {% if travel_upcoming %}
+          Upcoming travel detected! How do you want to charge?
+        {% else %}
+          Ready to charge. Select your speed:
+        {% endif %}
+      data:
+        actions:
+          - action: "CHARGE_40A"
+            title: "40A (Fast)"
+          - action: "CHARGE_15A"
+            title: "15A (Slow)"
+          - action: "CHARGE_LATER"
+            title: "Wait for Off-Peak"
+
+  # 4. Wait for response
+  - wait_for_trigger:
+      - platform: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: "CHARGE_40A"
+      - platform: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: "CHARGE_15A"
+      - platform: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: "CHARGE_LATER"
+    timeout: "01:00:00"
+    continue_on_timeout: false
+
+  # 5. Execute action based on response
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ wait.trigger.event.data.action == 'CHARGE_40A' }}"
+        sequence:
+          - action: number.set_value
+            target:
+              entity_id: !input charger_amps
+            data:
+              value: 40
+          - action: switch.turn_on
+            target:
+              entity_id: !input charger_switch
+
+      - conditions:
+          - condition: template
+            value_template: "{{ wait.trigger.event.data.action == 'CHARGE_15A' }}"
+        sequence:
+          - action: number.set_value
+            target:
+              entity_id: !input charger_amps
+            data:
+              value: 15
+          - action: switch.turn_on
+            target:
+              entity_id: !input charger_switch
+
+      - conditions:
+          - condition: template
+            value_template: "{{ wait.trigger.event.data.action == 'CHARGE_LATER' }}"
+        sequence:
+          - action: switch.turn_off
+            target:
+              entity_id: !input charger_switch
+          - wait_for_trigger:
+              - platform: time
+                at: "23:00:00"
+          - action: switch.turn_on
+            target:
+              entity_id: !input charger_switch
