@@ -5,7 +5,7 @@ from typing import Any
 
 from pyemvue import PyEmVue
 from pyemvue.device import VueDevice
-from requests import exceptions
+
 from homeassistant.components.number import (
     NumberDeviceClass,
     NumberEntity,
@@ -81,15 +81,24 @@ class EmporiaChargerCurrentNumber(EmporiaChargerEntity, NumberEntity):  # type: 
         self._attr_native_min_value = 6.0
         self._attr_native_max_value = float(device.ev_charger.max_charging_rate)
         self._attr_native_step = 1.0
-        self._attr_unique_id = f"emporia_vue.charger_current_{self._device_gid}"
 
-        # Optimistic state to prevent the slider from snapping back while waiting for API
+        # Optimistic state to prevent the slider from snapping back while
+        # waiting for the API/coordinator to catch up.
         self._optimistic_value: float | None = None
+
+    @property
+    def unique_id(self) -> str:
+        """Unique ID for the charger current limit number.
+
+        Overrides EmporiaChargerEntity.unique_id (which is shared across all
+        charger entity types) so this entity has its own distinct ID rather
+        than colliding conceptually with the charger switch's unique_id.
+        """
+        return f"number.emporia_vue.charger_current_{self._device_gid}"
 
     @property
     def native_value(self) -> float | None:
         """Return the current charging rate."""
-        # Return the optimistic value immediately if an API update was recently fired
         if self._optimistic_value is not None:
             return self._optimistic_value
 
@@ -103,36 +112,31 @@ class EmporiaChargerCurrentNumber(EmporiaChargerEntity, NumberEntity):  # type: 
         current = int(value)
         current = max(6, min(current, int(self._attr_native_max_value)))
 
-        # Remember previous value in case the API call fails
         previous_value = self.native_value
 
-        # 1. Instantly update the HA UI optimistically
         self._optimistic_value = float(current)
         self.async_write_ha_state()
 
         try:
-            # 2. Execute the API call in the executor thread
             await self.hass.async_add_executor_job(
                 self._vue.update_charger,
                 self.coordinator.data[self._device_gid],
                 self.coordinator.data[self._device_gid].charger_on,
                 current,
             )
-            # 3. Request a fresh poll from the coordinator
             await self.coordinator.async_request_refresh()
         except Exception as err:
-            # 4. If the call fails, revert the slider and raise a clean HA error
             self._optimistic_value = previous_value
             self.async_write_ha_state()
             _LOGGER.error("Error updating charger current: %s", err)
             raise HomeAssistantError(
                 f"Failed to set Emporia charger current: {err}"
             ) from err
-        finally:
-        finally:
+        else:
             # Only clear the optimistic override once the coordinator's data
-            # actually agrees with what we set — otherwise keep showing the
-            # optimistic value until the next successful refresh catches up.
+            # actually agrees with what we set — Emporia's API can be
+            # eventually-consistent, so a refresh right after a successful
+            # write may still briefly report the old value.
             data = self.coordinator.data.get(self._device_gid)
             if data and float(data.charging_rate) == self._optimistic_value:
                 self._optimistic_value = None
