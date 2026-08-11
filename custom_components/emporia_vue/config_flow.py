@@ -6,7 +6,7 @@ from functools import partial
 import logging
 from typing import Any
 
-from pyemvue import PyEmVue
+
 import voluptuous as vol
 
 from homeassistant import config_entries, exceptions
@@ -50,10 +50,11 @@ def redact_config_data(data: Mapping[str, Any]) -> dict[str, Any]:
 
 
 class VueHub:
-    """Hub for the Emporia Vue Integration."""
-
-    def __init__(self) -> None:
-        """Initialize."""
+    def __init__(self):
+        """Initialize the hub."""
+        # --- LAZY IMPORT ---
+        from pyemvue import PyEmVue
+        
         self.vue = PyEmVue()
 
     async def authenticate(self, data: dict | Mapping[str, Any]) -> bool:
@@ -89,6 +90,12 @@ async def validate_input(data: dict | Mapping[str, Any]) -> dict[str, Any]:
 
     Data has the keys from DATA_SCHEMA with values provided by the user.
     """
+    # --- LAZY IMPORTS ---
+    # Moved inside the function to prevent loading during HA startup
+    import pyemvue
+    from pyemvue import PyEmVue
+    # --------------------
+
     hub = VueHub()
     if not await hub.authenticate(data):
         raise InvalidAuth
@@ -118,6 +125,7 @@ async def validate_input(data: dict | Mapping[str, Any]) -> dict[str, Any]:
         SOLAR_INVERT: new_data[SOLAR_INVERT],
         AUTH_METHOD: new_data[AUTH_METHOD],
     }
+    
     if new_data[AUTH_METHOD] == AUTH_METHOD_TOKENS:
         entry_data.update(
             {
