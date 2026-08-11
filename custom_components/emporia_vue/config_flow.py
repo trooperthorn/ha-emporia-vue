@@ -98,7 +98,9 @@ class VueHub:
             return False
 
 
-async def validate_input(data: dict | Mapping[str, Any]) -> dict[str, Any]:
+async def validate_input(
+    hass: HomeAssistant, data: dict | Mapping[str, Any]
+) -> dict[str, Any]:
     """Validate the user input allows us to connect.
 
     Data has the keys from DATA_SCHEMA with values provided by the user.
@@ -138,7 +140,7 @@ async def validate_input(data: dict | Mapping[str, Any]) -> dict[str, Any]:
         SOLAR_INVERT: new_data[SOLAR_INVERT],
         AUTH_METHOD: new_data[AUTH_METHOD],
     }
-    
+
     if new_data[AUTH_METHOD] == AUTH_METHOD_TOKENS:
         entry_data.update(
             {
@@ -185,7 +187,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             try:
                 user_input[AUTH_METHOD] = AUTH_METHOD_EMAIL_PASSWORD
-                info = await validate_input(user_input)
+                info = await validate_input(self.hass, user_input)
                 # prevent setting up the same account twice
                 await self.async_set_unique_id(info[CUSTOMER_GID])
                 self._abort_if_unique_id_configured()
@@ -205,7 +207,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="email_password", data_schema=CONFIG_FLOW_SCHEMA, errors=errors
         )
 
-    async def async_step_tokens(
+   async def async_step_tokens(
         self, user_input=None
     ) -> config_entries.ConfigFlowResult:
         """Handle token authentication for Google/SSO accounts."""
@@ -213,7 +215,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             try:
                 user_input[AUTH_METHOD] = AUTH_METHOD_TOKENS
-                info = await validate_input(user_input)
+                # --- FIXED: Passed self.hass to validate_input ---
+                info = await validate_input(self.hass, user_input)
+                # -------------------------------------------------
+                
                 # prevent setting up the same account twice
                 await self.async_set_unique_id(info[CUSTOMER_GID])
                 self._abort_if_unique_id_configured()
@@ -232,7 +237,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="tokens", data_schema=TOKEN_CONFIG_FLOW_SCHEMA, errors=errors
         )
-
     async def async_step_import(
         self, import_data: Mapping[str, Any]
     ) -> config_entries.ConfigFlowResult:
