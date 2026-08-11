@@ -20,7 +20,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers.event import async_track_state_change_event
 
-from .const import DOMAIN
+from .const import DOMAIN, ENABLE_1D, ENABLE_1M, ENABLE_1MON, MAINS_CHANNEL_NUMS
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -48,38 +48,40 @@ async def async_setup_entry(
 
     all_entities = []
 
-    # 1. ADD THE 1-MINUTE SENSORS
-    if coordinator_1min:
-        for _, identifier in enumerate(coordinator_1min.data):
-            all_entities.append(CurrentVuePowerSensor(coordinator_1min, identifier))
-            
-        for gid, device in device_information.items():
-            if device.model is not None and "Vue" in device.model:
-                all_entities.append(VueBalanceSensor(coordinator_1min, device, "1MIN"))
-                all_entities.append(VueMainsSplitSensor(coordinator_1min, device, "1MIN", "Import"))
-                all_entities.append(VueMainsSplitSensor(coordinator_1min, device, "1MIN", "Export"))
 
-    # 2. ADD THE 1-MONTH SENSORS (Forcing MainFromGrid / MainToGrid)
-    if coordinator_1mon:
-        for _, identifier in enumerate(coordinator_1mon.data):
-            all_entities.append(CurrentVuePowerSensor(coordinator_1mon, identifier))
-            
-        for gid, device in device_information.items():
-            if device.model is not None and "Vue" in device.model:
-                is_main_grid = device.device_name in ["MainFromGrid", "MainToGrid"]
-                if enable_1mon or is_main_grid:
-                    all_entities.append(VueBalanceSensor(coordinator_1mon, device, "1MON"))
+    # 1. ADD PER-CHANNEL SENSORS FOR ALL THREE SCALES
+    # Every channel gets a Minute, Day, and Month entity created unconditionally.
+    # ENABLE_1M/1D/1MON only control the entity's default-enabled state in the
+    # registry, EXCEPT for Mains/Grid channels, which are always force-enabled.
+    def add_scale_block(coordinator, scale_enabled: bool):
+        if not coordinator:
+            return
+        for identifier in coordinator.data:
+            channel_num = str(coordinator.data[identifier].get("channel_num"))
+            is_mains = channel_num in MAINS_CHANNEL_NUMS
+            all_entities.append(
+                CurrentVuePowerSensor(
+                    coordinator, identifier,
+                    force_enabled=is_mains or scale_enabled,
+                )
+            )
 
-    # 3. ADD THE 1-DAY SENSORS (Forcing MainFromGrid / MainToGrid)
-    if coordinator_day_sensor:
-        for _, identifier in enumerate(coordinator_day_sensor.data):
-            all_entities.append(CurrentVuePowerSensor(coordinator_day_sensor, identifier))
-            
-        for gid, device in device_information.items():
-            if device.model is not None and "Vue" in device.model:
-                is_main_grid = device.device_name in ["MainFromGrid", "MainToGrid"]
-                if enable_1d or is_main_grid:
-                    all_entities.append(VueBalanceSensor(coordinator_day_sensor, device, "1D"))
+    add_scale_block(coordinator_1min, enable_1m)
+    add_scale_block(coordinator_day_sensor, enable_1d)
+    add_scale_block(coordinator_1mon, enable_1mon)
+
+    # 2. ADD BALANCE AND GRID IMPORT/EXPORT SENSORS FOR ALL THREE SCALES
+    # Always created, always enabled — independent of ENABLE_1M/1D/1MON.
+    for gid, device in device_information.items():
+        if device.model is not None and "Vue" in device.model:
+            for coordinator, scale in (
+                (coordinator_1min, "1MIN"),
+                (coordinator_day_sensor, "1D"),
+                (coordinator_1mon, "1MON"),
+            ):
+                all_entities.append(VueBalanceSensor(coordinator, device, scale))
+                all_entities.append(VueMainsSplitSensor(coordinator, device, scale, "Import"))
+                all_entities.append(VueMainsSplitSensor(coordinator, device, scale, "Export"))
 
     # 4. ADD CHARGER STATUS & CHARGE TIME SENSORS
     if coordinator_device_status and coordinator_device_status.data:
@@ -132,7 +134,7 @@ async def async_setup_entry(
 class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
     """Representation of a Vue Sensor's current power."""
 
-    def __init__(self, coordinator, identifier) -> None:
+    def __init__(self, coordinator, identifier, force_enabled: bool = True) -> None:
         """Pass coordinator to CoordinatorEntity."""
         super().__init__(coordinator)
         self._id = identifier
@@ -140,13 +142,15 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
         device_gid: int = coordinator.data[identifier]["device_gid"]
         channel_num: str = coordinator.data[identifier]["channel_num"]
         self._device: VueDevice = coordinator.data[identifier]["info"]
-        
-        # 1. Disable entity by default if no usage data is returned
+
+        # Enabled by default only if this scale/channel combination is
+        # supposed to be on (force_enabled, which is True for Mains channels
+        # regardless of the user's Minute/Day/Month option) AND we actually
+        # have usage data for it.
         initial_usage = coordinator.data[identifier].get("usage")
-        if initial_usage is None:
-            self._attr_entity_registry_enabled_default = False
-        else:
-            self._attr_entity_registry_enabled_default = True
+        self._attr_entity_registry_enabled_default = (
+            force_enabled and initial_usage is not None
+        )
 
         final_channel: VueDeviceChannel | None = None
         if self._device is not None:
@@ -166,22 +170,21 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
         self._channel: VueDeviceChannel = final_channel
         self._iskwh = self.scale_is_energy()
 
-        # 2. Add Device Registry Grouping
+        # Add Device Registry Grouping
         # Groups all entities under their parent hardware device in HA
         self._attr_device_info = DeviceInfo(
-            identifiers={("emporia_vue", str(device_gid))}, # Use your specific DOMAIN variable here
+            identifiers={(DOMAIN, str(device_gid))},
             name=self._device.device_name or f"Emporia Vue {device_gid}",
             manufacturer="Emporia",
             model=self._device.model,
         )
 
         self._attr_has_entity_name = True
-        
+
         if self._iskwh:
             self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
             self._attr_device_class = SensorDeviceClass.ENERGY
-            # Changed from TOTAL to TOTAL_INCREASING for accurate Energy Dashboard resets
-            self._attr_state_class = SensorStateClass.TOTAL_INCREASING 
+            self._attr_state_class = SensorStateClass.TOTAL_INCREASING
             self._attr_suggested_display_precision = 3
             self._attr_name = f"Energy {self.scale_readable()}"
         else:
