@@ -97,7 +97,6 @@ class VueHub:
             _LOGGER.debug("Emporia Vue authentication failed: %s", err)
             return False
 
-
 async def validate_input(
     hass: HomeAssistant, data: dict | Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -207,7 +206,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="email_password", data_schema=CONFIG_FLOW_SCHEMA, errors=errors
         )
 
-   async def async_step_tokens(
+    async def async_step_tokens(
         self, user_input=None
     ) -> config_entries.ConfigFlowResult:
         """Handle token authentication for Google/SSO accounts."""
@@ -215,9 +214,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             try:
                 user_input[AUTH_METHOD] = AUTH_METHOD_TOKENS
-                # --- FIXED: Passed self.hass to validate_input ---
                 info = await validate_input(self.hass, user_input)
-                # -------------------------------------------------
                 
                 # prevent setting up the same account twice
                 await self.async_set_unique_id(info[CUSTOMER_GID])
@@ -237,6 +234,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="tokens", data_schema=TOKEN_CONFIG_FLOW_SCHEMA, errors=errors
         )
+
     async def async_step_import(
         self, import_data: Mapping[str, Any]
     ) -> config_entries.ConfigFlowResult:
