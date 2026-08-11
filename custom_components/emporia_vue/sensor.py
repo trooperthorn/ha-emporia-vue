@@ -23,7 +23,6 @@ from .const import DOMAIN
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
 
-# def setup_platform(hass, config, add_entities, discovery_info=None):
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -35,34 +34,56 @@ async def async_setup_entry(
     coordinator_day_sensor = hass.data[DOMAIN][config_entry.entry_id][
         "coordinator_day_sensor"
     ]
+    device_information: dict[int, VueDevice] = hass.data[DOMAIN][config_entry.entry_id][
+        "device_information"
+    ]
 
     _LOGGER.info(hass.data[DOMAIN][config_entry.entry_id])
 
+    # 1. ADD THE 1-MINUTE SENSORS (Including Balance)
     if coordinator_1min:
         async_add_entities(
             CurrentVuePowerSensor(coordinator_1min, identifier)
             for _, identifier in enumerate(coordinator_1min.data)
         )
+        # Add Balance Sensor for 1-minute Power
+        async_add_entities(
+            VueBalanceSensor(coordinator_1min, device, "1MIN")
+            for gid, device in device_information.items()
+            if device.model is not None and "Vue" in device.model
+        )
 
+    # 2. ADD THE 1-MONTH SENSORS (Including Balance)
     if coordinator_1mon:
         async_add_entities(
             CurrentVuePowerSensor(coordinator_1mon, identifier)
             for _, identifier in enumerate(coordinator_1mon.data)
         )
+        # Add Balance Sensor for 1-month Energy
+        async_add_entities(
+            VueBalanceSensor(coordinator_1mon, device, "1MON")
+            for gid, device in device_information.items()
+            if device.model is not None and "Vue" in device.model
+        )
 
+    # 3. ADD THE 1-DAY SENSORS (Including Balance)
     if coordinator_day_sensor:
         async_add_entities(
             CurrentVuePowerSensor(coordinator_day_sensor, identifier)
             for _, identifier in enumerate(coordinator_day_sensor.data)
         )
+        # Add Balance Sensor for 1-day Energy
+        async_add_entities(
+            VueBalanceSensor(coordinator_day_sensor, device, "1D")
+            for gid, device in device_information.items()
+            if device.model is not None and "Vue" in device.model
+        )
 
-    # Add charger status sensors
+    # 4. ADD CHARGER STATUS SENSORS
     coordinator_device_status = hass.data[DOMAIN][config_entry.entry_id][
         "coordinator_device_status"
     ]
-    device_information: dict[int, VueDevice] = hass.data[DOMAIN][config_entry.entry_id][
-        "device_information"
-    ]
+    
     if coordinator_device_status and coordinator_device_status.data:
         async_add_entities(
             EmporiaChargerStatusSensor(coordinator_device_status, device_information[int(gid)])
@@ -320,3 +341,81 @@ class EmporiaChargerStatusSensor(CoordinatorEntity, SensorEntity):  # type: igno
             manufacturer="Emporia",
         )
 
+class VueBalanceSensor(CoordinatorEntity, SensorEntity):
+    """Representation of a dynamically calculated Unmonitored Balance sensor."""
+
+    def __init__(self, coordinator, device, scale: str) -> None:
+        """Initialize the balance sensor."""
+        super().__init__(coordinator)
+        self._device = device
+        self._scale = scale
+        self._device_gid = device.device_gid
+
+        self._attr_has_entity_name = True
+        self._attr_unique_id = f"vue_balance_{self._device_gid}_{scale}"
+
+        # Group this sensor with the physical Vue monitor in the HA UI
+        self._attr_device_info = DeviceInfo(
+            identifiers={("emporia_vue", str(self._device_gid))},
+            name=self._device.device_name or f"Emporia Vue {self._device_gid}",
+            manufacturer="Emporia",
+            model=self._device.model,
+        )
+
+        # Determine if we are measuring Power (1MIN) or Energy (1D/1MON)
+        self._iskwh = scale not in ["1S", "1MIN"]
+
+        if self._iskwh:
+            self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+            self._attr_device_class = SensorDeviceClass.ENERGY
+            self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+            self._attr_suggested_display_precision = 3
+            self._attr_name = f"Balance Energy ({scale})"
+        else:
+            self._attr_native_unit_of_measurement = UnitOfPower.WATT
+            self._attr_device_class = SensorDeviceClass.POWER
+            self._attr_state_class = SensorStateClass.MEASUREMENT
+            self._attr_suggested_display_precision = 1
+            self._attr_name = f"Balance Power ({scale})"
+
+    @property
+    def native_value(self) -> float | None:
+        """Calculate the balance dynamically from the coordinator data."""
+        if not self.coordinator.data:
+            return None
+
+        mains_usage = 0.0
+        branch_usage = 0.0
+
+        # Scan the coordinator data for THIS specific device and scale
+        for identifier, data in self.coordinator.data.items():
+            if data.get("device_gid") == self._device_gid and data.get("scale") == self._scale:
+                usage = data.get("usage")
+                if usage is None:
+                    continue
+
+                channel_num = str(data.get("channel_num"))
+
+                # Emporia Gen 2/3 hardware uses 1, 2, 3 (or "1,2,3") for Mains CTs.
+                # All branch circuits are channel 4 and above.
+                if channel_num in ["1", "2", "3", "1,2,3"]:
+                    mains_usage += usage
+                elif channel_num.isdigit() and int(channel_num) >= 4:
+                    branch_usage += usage
+
+        # Calculate balance. 
+        balance = mains_usage - branch_usage
+
+        # Due to slight analog inaccuracies in CT clamps, the sum of branches 
+        # can occasionally exceed the mains by a tiny fraction, resulting in a negative number.
+        # The Emporia app floors this at 0, so we should do the same to prevent UI artifacts.
+        return max(balance, 0.0)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, any]:
+        """Return the state attributes."""
+        return {
+            "device_gid": self._device_gid,
+            "scale": self._scale,
+            "description": "Calculated: Total Mains minus Sum of Branch Circuits",
+        }
