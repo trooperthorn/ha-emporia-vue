@@ -303,44 +303,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return LAST_MONTH_DATA
 
         coordinator_1min = None
-        if ENABLE_1M not in entry_data or entry_data[ENABLE_1M]:
-            coordinator_1min = DataUpdateCoordinator(
-                hass,
-                _LOGGER,
-                # Name of the data. For logging purposes.
-                name="sensor",
-                update_method=async_update_data_1min,
-                # Polling interval. Will only be polled if there are subscribers.
-                update_interval=timedelta(minutes=1),
-            )
-            await coordinator_1min.async_config_entry_first_refresh()
-            _LOGGER.debug("1min Update data: %s", coordinator_1min.data)
-        coordinator_1mon = None
-        if ENABLE_1MON not in entry_data or entry_data[ENABLE_1MON]:
-            coordinator_1mon = DataUpdateCoordinator(
-                hass,
-                _LOGGER,
-                # Name of the data. For logging purposes.
-                name="sensor",
-                update_method=async_update_month_sensors,
-                # Polling interval. Will only be polled if there are subscribers.
-                update_interval=timedelta(minutes=1),
-            )
-            await coordinator_1mon.async_config_entry_first_refresh()
-            _LOGGER.debug("1mon Update data: %s", coordinator_1mon.data)
+        coordinator_1min = DataUpdateCoordinator(
+            hass, _LOGGER, name="sensor",
+            update_method=async_update_data_1min,
+            update_interval=timedelta(minutes=1),
+        )
+        await coordinator_1min.async_config_entry_first_refresh()
 
-        coordinator_day_sensor = None
-        if ENABLE_1D not in entry_data or entry_data[ENABLE_1D]:
-            coordinator_day_sensor = DataUpdateCoordinator(
-                hass,
-                _LOGGER,
-                # Name of the data. For logging purposes.
-                name="sensor",
-                update_method=async_update_day_sensors,
-                # Polling interval. Will only be polled if there are subscribers.
-                update_interval=timedelta(minutes=1),
-            )
-            await coordinator_day_sensor.async_config_entry_first_refresh()
+        coordinator_1mon = DataUpdateCoordinator(
+            hass, _LOGGER, name="sensor",
+            update_method=async_update_month_sensors,
+            update_interval=timedelta(minutes=1),
+        )
+        await coordinator_1mon.async_config_entry_first_refresh()
+
+        coordinator_day_sensor = DataUpdateCoordinator(
+            hass, _LOGGER, name="sensor",
+            update_method=async_update_day_sensors,
+            update_interval=timedelta(minutes=1),
+        )
+        await coordinator_day_sensor.async_config_entry_first_refresh()
 
         # Check if any devices have outlets or chargers
         has_controllable_devices = any(
