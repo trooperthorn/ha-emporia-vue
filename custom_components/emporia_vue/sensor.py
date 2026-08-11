@@ -14,6 +14,8 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.entity_registry import RegistryEntryDisabling
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -30,94 +32,103 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the sensor platform."""
-    coordinator_1min = hass.data[DOMAIN][config_entry.entry_id]["coordinator_1min"]
-    coordinator_1mon = hass.data[DOMAIN][config_entry.entry_id]["coordinator_1mon"]
-    coordinator_day_sensor = hass.data[DOMAIN][config_entry.entry_id][
-        "coordinator_day_sensor"
-    ]
-    device_information: dict[int, VueDevice] = hass.data[DOMAIN][config_entry.entry_id][
-        "device_information"
-    ]
+    domain_data = hass.data[DOMAIN][config_entry.entry_id]
+    
+    coordinator_1min = domain_data.get("coordinator_1min")
+    coordinator_1mon = domain_data.get("coordinator_1mon")
+    coordinator_day_sensor = domain_data.get("coordinator_day_sensor")
+    coordinator_device_status = domain_data.get("coordinator_device_status")
+    device_information: dict[int, VueDevice] = domain_data.get("device_information", {})
 
-    _LOGGER.info(hass.data[DOMAIN][config_entry.entry_id])
+    _LOGGER.info(domain_data)
+
+    # Global configuration flags
+    enable_1m = config_entry.data.get(ENABLE_1M, True)
+    enable_1d = config_entry.data.get(ENABLE_1D, True)
+    enable_1mon = config_entry.data.get(ENABLE_1MON, True)
+
+    all_entities = []
 
     # 1. ADD THE 1-MINUTE SENSORS
     if coordinator_1min:
-        async_add_entities(
-            CurrentVuePowerSensor(coordinator_1min, identifier)
-            for _, identifier in enumerate(coordinator_1min.data)
-        )
-        
-        # Add Balance Sensor
-        async_add_entities(
-            VueBalanceSensor(coordinator_1min, device, "1MIN")
-            for gid, device in device_information.items()
-            if device.model is not None and "Vue" in device.model
-        )
-        
-        # Add Grid Import Sensor
-        async_add_entities(
-            VueMainsSplitSensor(coordinator_1min, device, "1MIN", "Import")
-            for gid, device in device_information.items()
-            if device.model is not None and "Vue" in device.model
-        )
-        
-        # Add Grid Export Sensor
-        async_add_entities(
-            VueMainsSplitSensor(coordinator_1min, device, "1MIN", "Export")
-            for gid, device in device_information.items()
-            if device.model is not None and "Vue" in device.model
-        )
+        for _, identifier in enumerate(coordinator_1min.data):
+            all_entities.append(CurrentVuePowerSensor(coordinator_1min, identifier))
+            
+        for gid, device in device_information.items():
+            if device.model is not None and "Vue" in device.model:
+                all_entities.append(VueBalanceSensor(coordinator_1min, device, "1MIN"))
+                all_entities.append(VueMainsSplitSensor(coordinator_1min, device, "1MIN", "Import"))
+                all_entities.append(VueMainsSplitSensor(coordinator_1min, device, "1MIN", "Export"))
 
-    # 2. ADD THE 1-MONTH SENSORS (Including Balance)
+    # 2. ADD THE 1-MONTH SENSORS (Forcing MainFromGrid / MainToGrid)
     if coordinator_1mon:
-        async_add_entities(
-            CurrentVuePowerSensor(coordinator_1mon, identifier)
-            for _, identifier in enumerate(coordinator_1mon.data)
-        )
-        # Add Balance Sensor for 1-month Energy
-        async_add_entities(
-            VueBalanceSensor(coordinator_1mon, device, "1MON")
-            for gid, device in device_information.items()
-            if device.model is not None and "Vue" in device.model
-        )
+        for _, identifier in enumerate(coordinator_1mon.data):
+            all_entities.append(CurrentVuePowerSensor(coordinator_1mon, identifier))
+            
+        for gid, device in device_information.items():
+            if device.model is not None and "Vue" in device.model:
+                is_main_grid = device.device_name in ["MainFromGrid", "MainToGrid"]
+                if enable_1mon or is_main_grid:
+                    all_entities.append(VueBalanceSensor(coordinator_1mon, device, "1MON"))
 
-    # 3. ADD THE 1-DAY SENSORS (Including Balance)
+    # 3. ADD THE 1-DAY SENSORS (Forcing MainFromGrid / MainToGrid)
     if coordinator_day_sensor:
-        async_add_entities(
-            CurrentVuePowerSensor(coordinator_day_sensor, identifier)
-            for _, identifier in enumerate(coordinator_day_sensor.data)
-        )
-        # Add Balance Sensor for 1-day Energy
-        async_add_entities(
-            VueBalanceSensor(coordinator_day_sensor, device, "1D")
-            for gid, device in device_information.items()
-            if device.model is not None and "Vue" in device.model
-        )
+        for _, identifier in enumerate(coordinator_day_sensor.data):
+            all_entities.append(CurrentVuePowerSensor(coordinator_day_sensor, identifier))
+            
+        for gid, device in device_information.items():
+            if device.model is not None and "Vue" in device.model:
+                is_main_grid = device.device_name in ["MainFromGrid", "MainToGrid"]
+                if enable_1d or is_main_grid:
+                    all_entities.append(VueBalanceSensor(coordinator_day_sensor, device, "1D"))
 
-    # 4. ADD CHARGER STATUS SENSORS
+    # 4. ADD CHARGER STATUS & CHARGE TIME SENSORS
     if coordinator_device_status and coordinator_device_status.data:
-        # Check if the user actively configured a valid vehicle SoC entity
         soc_sensor = config_entry.options.get("vehicle_soc_sensor")
         
-        if soc_sensor and isinstance(soc_sensor, str) and soc_sensor.strip():
-            async_add_entities(
-                [
-                    EmporiaEVChargeTimeNeededSensor(
-                        hass, config_entry, device_information[int(gid)]
+        for gid in coordinator_device_status.data:
+            if int(gid) in device_information and device_information[int(gid)].ev_charger:
+                device_obj = device_information[int(gid)]
+                
+                # Add charge time calculation sensor only if option is configured
+                if soc_sensor and isinstance(soc_sensor, str) and soc_sensor.strip():
+                    all_entities.append(
+                        EmporiaEVChargeTimeNeededSensor(hass, config_entry, device_obj)
                     )
-                    for gid in coordinator_device_status.data
-                    if int(gid) in device_information and device_information[int(gid)].ev_charger
-                ]
-            )
-    
-    if coordinator_device_status and coordinator_device_status.data:
-        async_add_entities(
-            EmporiaChargerStatusSensor(coordinator_device_status, device_information[int(gid)])
-            for gid in coordinator_device_status.data
-            if int(gid) in device_information and device_information[int(gid)].ev_charger
-        )
+                
+                # Add charger status sensor
+                all_entities.append(
+                    EmporiaChargerStatusSensor(coordinator_device_status, device_obj)
+                )
 
+    # Register all collected entities at once
+    async_add_entities(all_entities)
+
+    # 5. CLEAN UP / DISABLE DEVICES WITH ZERO ENTITIES
+    active_device_gids = {
+        getattr(entity, "_device_gid", None) 
+        for entity in all_entities 
+        if hasattr(entity, "_device_gid") and entity._device_gid is not None
+    }
+
+    device_registry = dr.async_get(hass)
+    
+    for dev_entry in dr.async_entries_for_config_entry(device_registry, config_entry.entry_id):
+        dev_gid = None
+        for domain_name, identifier in dev_entry.identifiers:
+            if domain_name == DOMAIN:
+                try:
+                    dev_gid = int(identifier)
+                except ValueError:
+                    pass
+        
+        # If the device has no active entities created, disable it in the registry
+        if dev_gid and dev_gid not in active_device_gids:
+            if not dev_entry.disabled_by:
+                device_registry.async_update_device(
+                    dev_entry.id,
+                    disabled_by=dr.DeviceEntryDisabling.INTEGRATION,
+                )
 
 class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
     """Representation of a Vue Sensor's current power."""
