@@ -208,30 +208,30 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Return the device info."""
-        device_name = self._channel.name
-        if not device_name:
-            # An unnamed *numbered* channel is a CT that has not been configured
-            # in the Emporia app. Falling back to the monitor's name gives every
-            # such channel an identical name, so a Vue with spare channels shows
-            # up as a pile of same-named devices (#379, #328).
-            # Aggregate channels ("1,2,3", MainsFromGrid, Balance, ...) legitimately
-            # represent the monitor itself, so those keep the monitor's name.
-            if self._channel.channel_num.isdigit():
-                device_name = (
-                    f"{self._device.device_name} Circuit {self._channel.channel_num}"
-                )
-            else:
-                device_name = self._device.device_name
+    """Return the device info."""
+    if self._channel.channel_num in MAINS_CHANNEL_NUMS:
+        # Group Mains/aggregate channels with the parent monitor device,
+        # alongside the Balance/Grid Import/Export sensors.
         return DeviceInfo(
-            identifiers={
-                (DOMAIN, f"{self._device.device_gid}-{self._channel.channel_num}")
-            },
-            name=device_name,
+            identifiers={(DOMAIN, str(self._device.device_gid))},
+            name=self._device.device_name or f"Emporia Vue {self._device.device_gid}",
             model=self._device.model,
             sw_version=self._device.firmware,
             manufacturer="Emporia",
         )
+    device_name = self._channel.name
+    if not device_name:
+        if self._channel.channel_num.isdigit():
+            device_name = f"{self._device.device_name} Circuit {self._channel.channel_num}"
+        else:
+            device_name = self._device.device_name
+    return DeviceInfo(
+        identifiers={(DOMAIN, f"{self._device.device_gid}-{self._channel.channel_num}")},
+        name=device_name,
+        model=self._device.model,
+        sw_version=self._device.firmware,
+        manufacturer="Emporia",
+    )
 
     @property
     def native_value(self) -> float | None:
