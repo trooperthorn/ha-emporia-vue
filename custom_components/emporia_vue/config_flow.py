@@ -9,10 +9,10 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries, exceptions
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
-from homeassistant.helpers import selector
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers import selector
 
 from .const import (
     AUTH_METHOD,
@@ -115,11 +115,6 @@ async def validate_input(
     if not await hub.authenticate(data):
         raise InvalidAuth
 
-    # If you cannot connect:
-    # throw CannotConnect
-    # If the authentication is wrong:
-    # InvalidAuth
-
     if not hub.vue.customer:
         raise InvalidAuth
 
@@ -165,6 +160,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
     CONNECTION_CLASS = config_entries.CONN_CLASS_CLOUD_POLL
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> config_entries.OptionsFlow:
+        """Get the options flow for this handler."""
+        return EmporiaVueOptionsFlowHandler(config_entry)
 
     async def async_step_user(self, user_input=None) -> config_entries.ConfigFlowResult:
         """Handle the initial step."""
@@ -367,14 +370,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    @staticmethod
-    @callback
-    def async_get_options_flow(
-        config_entry: config_entries.ConfigEntry,
-    ) -> config_entries.OptionsFlow:
-        """Get the options flow for this handler."""
-        return EmporiaVueOptionsFlowHandler(config_entry)
-
 
 class EmporiaVueOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options for Emporia Vue."""
@@ -396,9 +391,12 @@ class EmporiaVueOptionsFlowHandler(config_entries.OptionsFlow):
             {
                 vol.Optional(
                     "vehicle_soc_sensor",
-                    default=options.get("vehicle_soc_sensor"),
+                    description={"suggested_value": options.get("vehicle_soc_sensor")},
                 ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="sensor")
+                    selector.EntitySelectorConfig(
+                        domain="sensor",
+                        multiple=False,
+                    )
                 ),
                 vol.Optional(
                     "battery_capacity_kwh",
@@ -419,6 +417,8 @@ class EmporiaVueOptionsFlowHandler(config_entries.OptionsFlow):
             step_id="init",
             data_schema=options_schema,
         )
+
+
 class CannotConnect(exceptions.HomeAssistantError):
     """Error to indicate we cannot connect."""
 
