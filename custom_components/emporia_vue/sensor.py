@@ -131,38 +131,48 @@ async def async_setup_entry(
             )
 
     # 1. ADD PER-CHANNEL SENSORS FOR ALL THREE SCALES
-    # Every channel is always created for Minute, Day, and Month — this
-    # includes single-CT monitors (e.g. solar) via their own "1,2,3"
-    # channel, native MainsFromGrid/MainsToGrid channels where Emporia
-    # provides them, and every ordinary branch circuit.
+    # 1. ADD PER-CHANNEL SENSORS FOR ALL THREE SCALES
+    
+    # --- FIX 1: Prime coordinator data with virtual API channels (TotalUsage, Balance) ---
+    for gid, device in device_information.items():
+        for coord, scale in [
+            (coordinator_1min, "1MIN"),
+            (coordinator_day_sensor, "1D"),
+            (coordinator_1mon, "1MON")
+        ]:
+            if coord and coord.data is not None:
+                for v_chan in ["TotalUsage", "Balance"]:
+                    v_id = f"{gid}-{v_chan}-{scale}"
+                    if v_id not in coord.data:
+                        coord.data[v_id] = {
+                            "device_gid": gid,
+                            "channel_num": v_chan,
+                            "scale": scale,
+                            "info": device
+                        }
+    # -------------------------------------------------------------------------------------
+
     add_scale_block(coordinator_1min, enable_1m)
     add_scale_block(coordinator_day_sensor, enable_1d)
     add_scale_block(coordinator_1mon, enable_1mon)
 
     # 2. ADD BALANCE AND GRID IMPORT/EXPORT SENSORS FOR ALL THREE SCALES
-    # Always created, always enabled — independent of ENABLE_1M/1D/1MON —
-    # but only for devices that are genuinely a Mains/panel device (see
-    # _device_is_true_mains_panel). The derived Grid Import/Export sensor
-    # is skipped per-scale wherever that scale already has Emporia's own
-    # native MainsFromGrid/MainsToGrid channels, since CurrentVuePowerSensor
-    # already creates entities for those (via MAINS_CHANNEL_NUMS) and
-    # they're a more authoritative source than our minute-integrated
-    # derivation.
     for gid, device in device_information.items():
-        if _device_is_true_mains_panel(device):
-            for coordinator, scale in (
-                (coordinator_1min, "1MIN"),
-                (coordinator_day_sensor, "1D"),
-                (coordinator_1mon, "1MON"),
-            ):
-                all_entities.append(VueBalanceSensor(coordinator, device, scale))
-                if not _coordinator_has_native_mains_split(coordinator, gid):
-                    all_entities.append(
-                        VueMainsSplitSensor(coordinator, device, scale, "Import")
-                    )
-                    all_entities.append(
-                        VueMainsSplitSensor(coordinator, device, scale, "Export")
-                    )
+        # FIX 2: Removed `if _device_is_true_mains_panel(device):` restriction to unblock 
+        # Balance & Mains generation on monitors handling solar/net metering.
+        for coordinator, scale in (
+            (coordinator_1min, "1MIN"),
+            (coordinator_day_sensor, "1D"),
+            (coordinator_1mon, "1MON"),
+        ):
+            all_entities.append(VueBalanceSensor(coordinator, device, scale))
+            if not _coordinator_has_native_mains_split(coordinator, gid):
+                all_entities.append(
+                    VueMainsSplitSensor(coordinator, device, scale, "Import")
+                )
+                all_entities.append(
+                    VueMainsSplitSensor(coordinator, device, scale, "Export")
+                )
 
     # 3. ADD CHARGER STATUS & CHARGE TIME SENSORS
     if coordinator_device_status and coordinator_device_status.data:
@@ -247,6 +257,16 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
                 if channel.channel_num == channel_num:
                     final_channel = channel
                     break
+                    
+        # --- FIX 3: Generate mock physical channels for Emporia's virtual metrics ---
+        if final_channel is None and channel_num in ["TotalUsage", "Balance"]:
+            final_channel = VueDeviceChannel()
+            final_channel.channel_num = channel_num
+            final_channel.name = "Total Usage" if channel_num == "TotalUsage" else "API Balance"
+            final_channel.channel_multiplier = 1.0
+            final_channel.device_gid = device_gid
+        # ----------------------------------------------------------------------------
+
         if final_channel is None:
             _LOGGER.warning(
                 "No channel found for device_gid %s and channel_num %s",
@@ -255,6 +275,7 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
             )
             raise RuntimeError(
                 f"No channel found for device_gid {device_gid} and channel_num {channel_num}"
+            )
             )
         self._channel: VueDeviceChannel = final_channel
         self._iskwh = self.scale_is_energy()
