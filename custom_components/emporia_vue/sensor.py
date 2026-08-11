@@ -89,7 +89,7 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
                     final_channel = channel
                     break
         if final_channel is None:
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "No channel found for device_gid %s and channel_num %s",
                 device_gid,
                 channel_num,
