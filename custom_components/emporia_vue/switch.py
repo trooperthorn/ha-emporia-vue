@@ -144,21 +144,23 @@ class EmporiaChargerSwitch(EmporiaChargerEntity, SwitchEntity):  # type: ignore
         return self.coordinator.data[self._device_gid].charger_on
 
     async def _update_switch(self, on: bool) -> None:
-        """Update the switch."""
-        try:
-            await self.hass.async_add_executor_job(
-                self._vue.update_charger,
-                self.coordinator.data[self._device_gid],
-                on,
-            )
-        except exceptions.HTTPError as err:
-            _LOGGER.error(
-                "Error updating charger status: %s \nResponse body: %s",
-                err,
-                err.response.text,
-            )
-            raise
-        await self.coordinator.async_request_refresh()
+    """Update the switch."""
+    charger = self.coordinator.data[self._device_gid]
+    try:
+        await self.hass.async_add_executor_job(
+            self._vue.update_charger,
+            charger,
+            on,
+            charger.charging_rate,  # preserve the currently-set current
+        )
+    except exceptions.HTTPError as err:
+        _LOGGER.error(
+            "Error updating charger status: %s \nResponse body: %s",
+            err,
+            err.response.text,
+        )
+        raise
+    await self.coordinator.async_request_refresh()
 
     def turn_on(self, **kwargs: Any) -> None:
         """Turn the charger on."""
