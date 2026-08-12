@@ -102,11 +102,12 @@ async def async_setup_entry(
     enable_1m = config_entry.data.get(ENABLE_1M, True)
     enable_1d = config_entry.data.get(ENABLE_1D, True)
     enable_1mon = config_entry.data.get(ENABLE_1MON, True)
+    solar_invert = config_entry.data.get("solar_invert", True)
 
     all_entities = []
 
     def add_scale_block(coordinator, scale_enabled: bool) -> None:
-        """Create a CurrentVuePowerSensor for every real channel this coordinator has.
+        """Create a CurrentVuePowerSensor for every real channel this coordinator has."""
 
         Every channel is always created. scale_enabled only controls the
         default-enabled state in the entity registry, EXCEPT Mains channels,
@@ -121,12 +122,14 @@ async def async_setup_entry(
             channel_num = str(entry.get("channel_num"))
             if channel_num in MAINS_SPLIT_CHANNELS:
                 continue
-            is_mains = channel_num in MAINS_CHANNEL_NUMS
+                
+            # FORCE ALL TO BE ENABLED AND PASS SOLAR INVERT VARIABLE
             all_entities.append(
                 CurrentVuePowerSensor(
                     coordinator,
                     identifier,
-                    force_enabled=is_mains or scale_enabled,
+                    force_enabled=True,
+                    solar_invert=solar_invert,
                 )
             )
 
@@ -217,19 +220,18 @@ async def async_setup_entry(
 class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
     """Representation of a Vue Sensor's current power."""
 
-    def __init__(self, coordinator, identifier, force_enabled: bool = True) -> None:
+    def __init__(self, coordinator, identifier, force_enabled: bool = True, solar_invert: bool = True) -> None:
         """Pass coordinator to CoordinatorEntity."""
         super().__init__(coordinator)
+        self._solar_invert = solar_invert
         self._id = identifier
         self._scale: str = coordinator.data[identifier]["scale"]
         device_gid: int = coordinator.data[identifier]["device_gid"]
         channel_num: str = coordinator.data[identifier]["channel_num"]
         self._device: VueDevice = coordinator.data[identifier]["info"]
 
-        initial_usage = coordinator.data[identifier].get("usage")
-        self._attr_entity_registry_enabled_default = (
-            force_enabled and initial_usage is not None
-        )
+        # REMOVED INITIAL USAGE CHECK SO ENTITIES ARE NEVER HIDDEN ON REBOOT
+        self._attr_entity_registry_enabled_default = force_enabled
 
         final_channel: VueDeviceChannel | None = None
         if self._device is not None:
@@ -320,7 +322,11 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
         """Return the state of the sensor."""
         if self._id in self.coordinator.data:
             usage = self.coordinator.data[self._id].get("usage")
-            return self.scale_usage(usage) if usage is not None else None
+            if usage is not None:
+                # IMPLEMENT MISSING SOLAR INVERT MATH FOR HA ENERGY DASHBOARD
+                if self._solar_invert and getattr(self._channel, "channel_type_gid", None) == SOLAR_CHANNEL_TYPE_GID:
+                    usage = -usage
+                return self.scale_usage(usage)
         return None
 
     @property
