@@ -109,12 +109,9 @@ async def async_setup_entry(
     def add_scale_block(coordinator, scale_enabled: bool) -> None:
         """Create a CurrentVuePowerSensor for every real channel this coordinator has."""
 
-        Every channel is always created. scale_enabled only controls the
-        default-enabled state in the entity registry, EXCEPT Mains channels,
-        which are always force-enabled. Synthetic Mains Import/Export
-        entries are skipped here — they're represented by VueMainsSplitSensor
-        instead, added below.
-        """
+        # Every channel is always created. scale_enabled only controls the default-enabled state in the entity registry, EXCEPT Mains channels, which are always force-enabled. Synthetic Mains Import/Export
+        # entries are skipped here, they're represented by VueMainsSplitSensor instead, added below.
+        
         if not coordinator or not coordinator.data:
             return
         for identifier in coordinator.data:
