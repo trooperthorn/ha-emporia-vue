@@ -134,6 +134,26 @@ This section breaks down where the power consumed by your house is actually goin
 2. **Wait 2 Hours:** Home Assistant’s Long-Term Statistics engine only compiles Energy Dashboard data once an hour. After configuring this, the dashboard will remain blank or show incomplete data for up to two hours while the database builds its first baseline.
 3. **Do not duplicate Mains:** Never add the raw Mains sensors to the "Individual Devices" list. Home Assistant automatically calculates your total home consumption mathematically (`Grid Import` + `Solar Production` - `Grid Export`). If you add Mains to the device list, your dashboard will double-count your entire house's consumption.
 
+## Automation Blueprints
+
+`custom_components/emporia_vue/blueprints/automation/` ships ready-to-import blueprints. Import via **Settings → Automations & Scenes → Blueprints → Import Blueprint**, pointing at the raw GitHub URL of the file, or copy it into your own `config/blueprints/automation/` folder. None of these require Emporia-specific entities except where noted — they use generic `sensor`/`switch`/`number`/`climate`/`binary_sensor` selectors so they work with whatever integrations you actually have (ELK-M1, Davis, WeatherFlow/Tempest, your EV integration, etc).
+
+### EV charging
+
+* **EV Charging: Solar Excess Only** (`ev_solar_excess_charging.yaml`) — Throttles charging current to roughly match the power currently flowing back to the grid, so the car only ever draws from surplus solar. Pair with this integration's `Grid Export Power (1MIN)` sensor.
+* **EV Charging: Ensure Ready by Departure** (`ev_departure_readiness.yaml`) — A safety net for the blueprint above. Estimates whether the car needs more range than it currently has (with a configurable overhead buffer for weather/detours) and whether there's still enough time before your departure to get that charge from solar excess alone; if not, it forces a full-speed charge instead of waiting. Uses this integration's own `EV Charge Time Needed` sensor.
+* **EV Charging: Pre-Sunset Ramp Down** (`ev_predictive_solar.yaml`) — Steps charging current down and then off as the sun sets, to avoid pulling expensive evening grid power.
+* **EV Charging: Smart Travel Prompt** (`ev_smart_travel.yaml`) — Sends an actionable notification with charging-speed options when the car is plugged in, checking your calendar for upcoming travel.
+
+### HVAC / climate
+
+* **HVAC: Pause When a Window or Door Opens** (`hvac_window_door_pause.yaml`) — Pauses heating/cooling once any monitored door/window contact sensor (ELK-M1 zones, Z-Wave/Zigbee contacts, etc.) has been open past a grace period, and restores it once everything's closed.
+* **HVAC: Free Cooling Advisor** (`weather_free_cooling_advisor.yaml`) — Notifies you when outdoor conditions (from a Davis, WeatherFlow/Tempest, or any weather integration) are actually better than indoor conditions while the AC is running, so opening windows could cool the house for free. Advisory only — nothing is switched automatically.
+
+### Other energy blueprints
+
+* **Energy: Circuit Left On Alert** (`circuit_left_on_alert.yaml`) — Notifies you when a monitored circuit (or the `Balance` unmonitored-load sensor) has been drawing power above a threshold for longer than expected, with optional quiet hours for circuits that are supposed to run overnight.
+
 ## Removing the integration
 
 1. Go into **Settings** → **Devices & Services** → **Integrations**.

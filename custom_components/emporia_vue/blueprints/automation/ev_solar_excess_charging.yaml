@@ -1,0 +1,133 @@
+blueprint:
+  name: "EV Charging: Solar Excess Only"
+  description: >-
+    Charges the EV only when solar production is covering the house and
+    sending the surplus back to the grid, throttling the charging current to
+    roughly match the available excess instead of pulling from the grid.
+    Pair with the "Grid Export Power (1MIN)" sensor this integration
+    creates. Checks periodically rather than reacting instantly, since
+    export power is noisy minute to minute.
+  domain: automation
+  input:
+    grid_export_power:
+      name: Grid Export Power Sensor
+      description: >-
+        The Emporia "Grid Export Power (1MIN)" sensor (or an equivalent W
+        sensor from your solar/inverter integration) reporting power
+        currently flowing back to the grid.
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+    charger_switch:
+      name: EV Charger Switch
+      selector:
+        entity:
+          domain: switch
+    charger_amps:
+      name: EV Charger Amperage Control
+      selector:
+        entity:
+          domain: number
+    check_interval_minutes:
+      name: Check Interval (minutes)
+      description: How often to re-evaluate export power and adjust charging.
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 30
+          unit_of_measurement: minutes
+    min_export_to_start:
+      name: Minimum Export to Start Charging (W)
+      description: Export power must be at or above this before charging turns on.
+      default: 1400
+      selector:
+        number:
+          min: 0
+          max: 20000
+          unit_of_measurement: W
+    stop_below_export:
+      name: Export Level to Stop Charging (W)
+      description: >-
+        Charging turns off if export power drops below this. Keep it lower
+        than "Minimum Export to Start" to avoid rapidly cycling on/off
+        around one threshold.
+      default: 500
+      selector:
+        number:
+          min: 0
+          max: 20000
+          unit_of_measurement: W
+    min_charging_amps:
+      name: Minimum Charging Current (A)
+      description: Most EVSEs can't go below 6A; going lower just stops charging.
+      default: 6
+      selector:
+        number:
+          min: 6
+          max: 48
+          unit_of_measurement: A
+    max_charging_amps:
+      name: Maximum Charging Current (A)
+      default: 32
+      selector:
+        number:
+          min: 6
+          max: 48
+          unit_of_measurement: A
+    volts:
+      name: Charging Voltage
+      description: 240 for most US Level 2 EVSEs.
+      default: 240
+      selector:
+        number:
+          min: 100
+          max: 250
+          unit_of_measurement: V
+
+mode: restart
+trigger:
+  - platform: time_pattern
+    minutes: !input check_interval_minutes
+
+variables:
+  grid_export_power_entity: !input grid_export_power
+  export_watts: "{{ states(grid_export_power_entity) | float(0) }}"
+  min_start: !input min_export_to_start
+  min_stop: !input stop_below_export
+  min_amps: !input min_charging_amps
+  max_amps: !input max_charging_amps
+  volts_input: !input volts
+  # Amps the current export could support, clamped to the configured range.
+  target_amps: >-
+    {{ [[ (export_watts / volts_input) | round(0), min_amps ] | max, max_amps] | min }}
+
+condition: []
+
+action:
+  - choose:
+      # Not enough export to justify charging at all — stop.
+      - conditions:
+          - condition: template
+            value_template: "{{ export_watts < min_stop }}"
+        sequence:
+          - action: switch.turn_off
+            target:
+              entity_id: !input charger_switch
+
+      # Enough export to start or keep charging — set the throttled current and ensure it's on.
+      - conditions:
+          - condition: template
+            value_template: "{{ export_watts >= min_start }}"
+        sequence:
+          - action: number.set_value
+            target:
+              entity_id: !input charger_amps
+            data:
+              value: "{{ target_amps }}"
+          - action: switch.turn_on
+            target:
+              entity_id: !input charger_switch
+    # Between stop_below_export and min_export_to_start: leave the charger in
+    # whatever state it's already in (hysteresis band, avoids flapping).
