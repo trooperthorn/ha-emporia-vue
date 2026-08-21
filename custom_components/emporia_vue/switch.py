@@ -10,6 +10,7 @@ from requests import exceptions
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import (
@@ -18,9 +19,14 @@ from homeassistant.helpers.update_coordinator import (
 )
 
 from .charger_entity import EmporiaChargerEntity
-from .const import DOMAIN, VUE_DATA
+from .const import DOMAIN
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
+
+# These entities issue direct writes to the Emporia API (outlet/charger
+# on-off). Limit to one in-flight write at a time so two near-simultaneous
+# toggles can't race each other against the API.
+PARALLEL_UPDATES = 1
 
 
 async def async_setup_entry(
@@ -29,13 +35,10 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the switch platform."""
-    vue: PyEmVue = hass.data[DOMAIN][config_entry.entry_id][VUE_DATA]
-    coordinator: DataUpdateCoordinator | None = hass.data[DOMAIN][config_entry.entry_id][
-        "coordinator_device_status"
-    ]
-    device_information: dict[int, VueDevice] = hass.data[DOMAIN][config_entry.entry_id][
-        "device_information"
-    ]
+    runtime = config_entry.runtime_data
+    vue: PyEmVue = runtime.vue
+    coordinator: DataUpdateCoordinator | None = runtime.coordinator_device_status
+    device_information: dict[int, VueDevice] = runtime.device_information
 
     if coordinator is None or coordinator.data is None:
         return
@@ -151,5 +154,9 @@ class EmporiaChargerSwitch(EmporiaChargerEntity, SwitchEntity):  # type: ignore
                 err,
                 err.response.text,
             )
-            raise
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="charger_update_failed",
+                translation_placeholders={"error": str(err)},
+            ) from err
         await self.coordinator.async_request_refresh()

@@ -59,6 +59,30 @@ Configuration is done directly in the Home Assistant UI, no manual config file e
 
    
 
+### Configuration parameters
+
+The setup and reconfigure forms expose these options:
+
+| Option | Effect |
+|---|---|
+| **Power Minute Average Sensor** (`enable_1m`) | Default-enabled state for per-channel 1-minute power (W) sensors. Mains/Grid sensors are always created and enabled regardless of this setting. |
+| **Energy Today Sensor** (`enable_1d`) | Default-enabled state for per-channel "today" energy (kWh) sensors. |
+| **Energy This Month Sensor** (`enable_1mon`) | Default-enabled state for per-channel "this month" energy (kWh) sensors, reset on your Emporia billing cycle date. |
+| **Invert Values for Solar Circuits** (`solar_invert`) | Emporia sometimes reports solar production as a negative number depending on how the CT clamp is installed. Enable this to flip solar channels positive for the Energy Dashboard. |
+
+All three `enable_*` options only change whether a sensor starts out enabled in the entity registry — every sensor is still created and can be manually enabled at any time from **Settings → Devices & Services → Entities** without needing to reconfigure the integration.
+
+The integration's **Configure** button (separate from reconfigure) also exposes:
+
+| Option | Effect |
+|---|---|
+| **Vehicle SoC sensor** (`vehicle_soc_sensor`) | An existing HA sensor entity reporting your EV's state of charge (%). When set, an "EV Charge Time Needed" sensor is created for each EV charger, estimating hours remaining to reach 100% at the currently configured charging current. |
+| **Battery capacity (kWh)** (`battery_capacity_kwh`) | Your vehicle's usable battery capacity, used for the charge-time estimate above. Defaults to 80 kWh. |
+
+### Actions
+
+This integration registers one custom action beyond the standard switch/number entities: **`emporia_vue.set_charger_current`**. It sets both the charging current (in amps) and on/off state for a target EV charger in a single call — see `services.yaml` for the full field list. It's primarily meant for use from automations/blueprints (see the bundled EV charging blueprints under `blueprints/automation/`) rather than everyday manual use, since the **Current Limit** number entity and charger **switch** entity cover the same functionality individually.
+
 ### Google/Apple Accounts
 
 If your Emporia account was created via Sign in with Google or Apple, the easiest solution is to **set an Emporia password** using the create account flow on the Emporia website or app using the same email address as you'd use with Google/Apple. Once set, you can log in using the standard email and password method above.
@@ -109,3 +133,11 @@ This section breaks down where the power consumed by your house is actually goin
 1. **Always use the `(1D)` sensors:** The Energy Dashboard requires sensors that track total accumulated energy over time (kWh). If you attempt to use the `(1MIN)` power (Watt) sensors, the dashboard will reject them.
 2. **Wait 2 Hours:** Home Assistant’s Long-Term Statistics engine only compiles Energy Dashboard data once an hour. After configuring this, the dashboard will remain blank or show incomplete data for up to two hours while the database builds its first baseline.
 3. **Do not duplicate Mains:** Never add the raw Mains sensors to the "Individual Devices" list. Home Assistant automatically calculates your total home consumption mathematically (`Grid Import` + `Solar Production` - `Grid Export`). If you add Mains to the device list, your dashboard will double-count your entire house's consumption.
+
+## Removing the integration
+
+1. Go into **Settings** → **Devices & Services** → **Integrations**.
+2. Find **Emporia Vue** and click the 3-dot menu, then **Delete**.
+3. This removes the config entry, all of its entities and devices, and unregisters the `emporia_vue.set_charger_current` action. It does not affect your Emporia account or hardware in any way — your Vue monitor keeps reporting to the Emporia app as normal.
+4. If you added `emporia_vue.set_charger_current` calls to any automations/scripts/blueprints, remove or update those separately; deleting the integration does not clean up references to it elsewhere in your configuration.
+5. If installed via HACS and you don't plan to reinstall, you can also remove it from HACS → Integrations → 3-dot menu → Remove.
