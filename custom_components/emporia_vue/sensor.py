@@ -33,6 +33,11 @@ from .const import (
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
+# All sensors here are read-only and backed by coordinators, which already
+# serialize their own API calls — no need to further limit concurrent entity
+# updates.
+PARALLEL_UPDATES = 0
+
 # Emporia's channel_type_gid for solar production channels. Used to make
 # sure solar isn't double-subtracted in the Balance calculation (see
 # VueBalanceSensor.native_value) — solar already nets out of the Mains
@@ -91,13 +96,13 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the sensor platform."""
-    domain_data = hass.data[DOMAIN][config_entry.entry_id]
+    runtime = config_entry.runtime_data
 
-    coordinator_1min = domain_data.get("coordinator_1min")
-    coordinator_1mon = domain_data.get("coordinator_1mon")
-    coordinator_day_sensor = domain_data.get("coordinator_day_sensor")
-    coordinator_device_status = domain_data.get("coordinator_device_status")
-    device_information: dict[int, VueDevice] = domain_data.get("device_information", {})
+    coordinator_1min = runtime.coordinator_1min
+    coordinator_1mon = runtime.coordinator_1mon
+    coordinator_day_sensor = runtime.coordinator_day_sensor
+    coordinator_device_status = runtime.coordinator_device_status
+    device_information: dict[int, VueDevice] = runtime.device_information
 
     enable_1m = config_entry.data.get(ENABLE_1M, True)
     enable_1d = config_entry.data.get(ENABLE_1D, True)
@@ -107,11 +112,15 @@ async def async_setup_entry(
     all_entities = []
 
     def add_scale_block(coordinator, scale_enabled: bool) -> None:
-        """Create a CurrentVuePowerSensor for every real channel this coordinator has."""
+        """Create a CurrentVuePowerSensor for every real channel this coordinator has.
 
-        # Every channel is always created. scale_enabled only controls the default-enabled state in the entity registry, EXCEPT Mains channels, which are always force-enabled. Synthetic Mains Import/Export
-        # entries are skipped here, they're represented by VueMainsSplitSensor instead, added below.
-        
+        Every channel is always created (so it can be manually enabled later
+        without a reload), but only Mains channels are force-enabled in the
+        entity registry. Every other channel's default-enabled state follows
+        the user's ENABLE_1M/1D/1MON choice for this scale. Synthetic Mains
+        Import/Export entries are skipped here — they're represented by
+        VueMainsSplitSensor instead, added below.
+        """
         if not coordinator or not coordinator.data:
             return
         for identifier in coordinator.data:
@@ -119,13 +128,13 @@ async def async_setup_entry(
             channel_num = str(entry.get("channel_num"))
             if channel_num in MAINS_SPLIT_CHANNELS:
                 continue
-                
-            # FORCE ALL TO BE ENABLED AND PASS SOLAR INVERT VARIABLE
+
+            is_mains = channel_num in MAINS_CHANNEL_NUMS
             all_entities.append(
                 CurrentVuePowerSensor(
                     coordinator,
                     identifier,
-                    force_enabled=True,
+                    force_enabled=is_mains or scale_enabled,
                     solar_invert=solar_invert,
                 )
             )

@@ -6,7 +6,6 @@ from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 import homeassistant.helpers.config_validation as cv
 
 DOMAIN = "emporia_vue"
-VUE_DATA = "vue_data"
 AUTH_METHOD = "auth_method"
 AUTH_METHOD_EMAIL_PASSWORD = "email_password"
 AUTH_METHOD_TOKENS = "tokens"

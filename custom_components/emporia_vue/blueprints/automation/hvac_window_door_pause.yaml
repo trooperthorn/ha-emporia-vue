@@ -1,0 +1,125 @@
+blueprint:
+  name: "HVAC: Pause When a Window or Door Opens"
+  description: >-
+    Pauses heating/cooling when any monitored window or door has been open
+    for longer than a grace period, and restores it once everything's
+    closed. Works with any door/window contact sensors — ELK-M1 zones
+    exposed as binary_sensor entities, Z-Wave/Zigbee contact sensors,
+    whatever you have. Not specific to Emporia hardware; this pairs well
+    with the circuit-level HVAC power sensor this integration creates, so
+    you can see the energy saved.
+  domain: automation
+  input:
+    contact_sensors:
+      name: Window/Door Sensors
+      description: >-
+        One or more binary_sensor entities (device_class door or window)
+        to monitor. The automation triggers if ANY of them are open past
+        the grace period, and only restores HVAC once ALL are closed.
+      selector:
+        entity:
+          domain: binary_sensor
+          device_class:
+            - door
+            - window
+          multiple: true
+    climate_entity:
+      name: Climate Entity
+      selector:
+        entity:
+          domain: climate
+    open_grace_period:
+      name: Grace Period Before Pausing
+      description: >-
+        How long a sensor must stay open before HVAC is paused — avoids
+        pausing for someone just stepping outside for a minute.
+      default:
+        minutes: 3
+      selector:
+        duration: {}
+    restore_hvac_mode:
+      name: HVAC Mode to Restore
+      description: >-
+        The mode to set when everything's closed again. This blueprint does
+        not track whatever mode was active before pausing — it restores to
+        this fixed mode. Use "heat_cool" (Auto) if that's your normal mode,
+        or match whatever you actually run day to day.
+      default: heat_cool
+      selector:
+        select:
+          options:
+            - "off"
+            - heat
+            - cool
+            - heat_cool
+            - auto
+            - dry
+            - fan_only
+    notify_service:
+      name: Notification Service (optional)
+      description: Leave blank to disable notifications.
+      default: ""
+      selector:
+        text: {}
+
+mode: restart
+trigger:
+  - platform: state
+    entity_id: !input contact_sensors
+    to: "on"
+    for: !input open_grace_period
+    id: opened
+  - platform: state
+    entity_id: !input contact_sensors
+    to: "off"
+    id: closed
+
+variables:
+  contact_sensors_entities: !input contact_sensors
+  notify_target: !input notify_service
+
+condition: []
+
+action:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: opened
+        sequence:
+          - action: climate.set_hvac_mode
+            target:
+              entity_id: !input climate_entity
+            data:
+              hvac_mode: "off"
+          - if:
+              - condition: template
+                value_template: "{{ notify_target | trim != '' }}"
+            then:
+              - action: "{{ notify_target }}"
+                data:
+                  title: "HVAC Paused"
+                  message: >-
+                    {{ trigger.to_state.attributes.friendly_name }} has been
+                    open for a while — pausing HVAC to save energy.
+
+      - conditions:
+          - condition: trigger
+            id: closed
+          # Only restore once every monitored sensor is actually closed.
+          - condition: template
+            value_template: >-
+              {{ expand(contact_sensors_entities) | selectattr('state', 'eq', 'on') | list | length == 0 }}
+        sequence:
+          - action: climate.set_hvac_mode
+            target:
+              entity_id: !input climate_entity
+            data:
+              hvac_mode: !input restore_hvac_mode
+          - if:
+              - condition: template
+                value_template: "{{ notify_target | trim != '' }}"
+            then:
+              - action: "{{ notify_target }}"
+                data:
+                  title: "HVAC Resumed"
+                  message: "All windows/doors closed — HVAC restored."

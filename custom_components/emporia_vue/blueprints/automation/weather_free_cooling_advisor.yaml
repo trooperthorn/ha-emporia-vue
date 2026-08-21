@@ -1,0 +1,105 @@
+blueprint:
+  name: "HVAC: Free Cooling Advisor"
+  description: >-
+    When the AC is actively cooling but outdoor conditions are actually
+    better than indoor (cooler and not too humid), notifies you that
+    opening windows could cool the house for free instead of running
+    compressor power. Works with any outdoor temperature/humidity source —
+    a Davis, WeatherFlow (Tempest), or other weather station integration,
+    or a plain outdoor temperature sensor — compared against an indoor
+    temperature sensor. Advisory only; nothing is switched automatically,
+    since only you know whether it's safe/practical to open windows right
+    now (pollen, security, rain, etc).
+  domain: automation
+  input:
+    indoor_temp_sensor:
+      name: Indoor Temperature Sensor
+      selector:
+        entity:
+          domain: sensor
+          device_class: temperature
+    outdoor_temp_sensor:
+      name: Outdoor Temperature Sensor
+      description: From your weather station integration (Davis, WeatherFlow/Tempest, etc.) or any outdoor temperature sensor.
+      selector:
+        entity:
+          domain: sensor
+          device_class: temperature
+    outdoor_humidity_sensor:
+      name: Outdoor Humidity Sensor (optional)
+      description: >-
+        If set, free cooling is only suggested when outdoor humidity is
+        also below the threshold below — avoids suggesting you open
+        windows into muggy air.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+          device_class: humidity
+    max_outdoor_humidity:
+      name: Maximum Outdoor Humidity (%)
+      default: 60
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+    climate_entity:
+      name: Climate Entity
+      selector:
+        entity:
+          domain: climate
+    temp_margin:
+      name: Minimum Outdoor Advantage (°)
+      description: >-
+        Outdoor temperature must be at least this many degrees cooler than
+        indoor before suggesting free cooling — avoids marginal calls.
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 20
+    check_interval_minutes:
+      name: Check Interval (minutes)
+      default: 20
+      selector:
+        number:
+          min: 5
+          max: 120
+          unit_of_measurement: minutes
+    notify_service:
+      name: Notification Service
+      selector:
+        text: {}
+
+mode: single
+trigger:
+  - platform: time_pattern
+    minutes: !input check_interval_minutes
+
+variables:
+  indoor_temp_entity: !input indoor_temp_sensor
+  outdoor_temp_entity: !input outdoor_temp_sensor
+  climate_entity_id: !input climate_entity
+  indoor_temp: "{{ states(indoor_temp_entity) | float(0) }}"
+  outdoor_temp: "{{ states(outdoor_temp_entity) | float(0) }}"
+  margin: !input temp_margin
+  humidity_sensor: !input outdoor_humidity_sensor
+  outdoor_humidity: "{{ states(humidity_sensor) | float(0) if humidity_sensor | trim != '' else 0 }}"
+  max_humidity: !input max_outdoor_humidity
+  humidity_ok: "{{ humidity_sensor | trim == '' or outdoor_humidity <= (max_humidity | float) }}"
+  is_cooling: "{{ state_attr(climate_entity_id, 'hvac_action') == 'cooling' }}"
+  free_cooling_available: "{{ is_cooling and humidity_ok and (indoor_temp - outdoor_temp) >= (margin | float) }}"
+
+condition:
+  - condition: template
+    value_template: "{{ free_cooling_available }}"
+
+action:
+  - action: !input notify_service
+    data:
+      title: "Free Cooling Available 🌬️"
+      message: >-
+        Outdoors is {{ (indoor_temp - outdoor_temp) | round(1) }}° cooler than
+        inside ({{ outdoor_temp }}° vs {{ indoor_temp }}°) while the AC is
+        running. Consider opening windows instead.

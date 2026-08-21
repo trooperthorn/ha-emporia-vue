@@ -71,6 +71,35 @@
             }
         }
     },
+    "exceptions": {
+        "invalid_auth": {
+            "message": "Failed to log in to Emporia Vue. Check your credentials or tokens and try again."
+        },
+        "setup_failed": {
+            "message": "Error while setting up Emporia Vue: {error}"
+        },
+        "platform_setup_failed": {
+            "message": "Error while setting up Emporia Vue entities: {error}"
+        },
+        "target_required": {
+            "message": "A target device or entity is required for this action."
+        },
+        "charger_gid_not_found": {
+            "message": "Could not determine the device ID from unique ID {unique_id}."
+        },
+        "invalid_charger_target": {
+            "message": "{entity_id} (unique ID {unique_id}) is not a valid EV charger."
+        },
+        "charger_state_not_found": {
+            "message": "Could not find the current state for {entity_id}."
+        },
+        "charger_info_not_found": {
+            "message": "Could not find charger information for device {charger_gid}."
+        },
+        "charger_update_failed": {
+            "message": "Failed to update the charger: {error}"
+        }
+    },
     "services": {
         "set_charger_current": {
             "description": "Sets the charging current for an EVSE/charger",

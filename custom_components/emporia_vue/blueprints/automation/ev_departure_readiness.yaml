@@ -1,0 +1,154 @@
+blueprint:
+  name: "EV Charging: Ensure Ready by Departure"
+  description: >-
+    A safety net for a solar-excess-only charging setup (see the "EV
+    Charging: Solar Excess Only" blueprint). On a periodic check, estimates
+    whether the car needs more range than it currently has for your planned
+    trip (with a configurable overhead buffer for cold weather, detours,
+    etc.), and whether there's still enough time before departure to get
+    that charge from solar alone. If not, it forces full-speed grid charging
+    now instead of waiting for excess solar that won't arrive in time. If
+    there's still plenty of time, it does nothing and leaves charging
+    decisions to your solar-excess automation.
+  domain: automation
+  input:
+    range_remaining_sensor:
+      name: Vehicle Range Remaining Sensor
+      description: >-
+        A sensor from your vehicle's integration reporting estimated range
+        remaining (miles or km — just be consistent with the trip distance
+        sensor below).
+      selector:
+        entity:
+          domain: sensor
+          device_class: distance
+    trip_distance_sensor:
+      name: Trip Distance Needed
+      description: >-
+        A sensor or input_number giving the distance you need for your next
+        trip/day. Could come from a routine, a saved commute distance
+        (input_number), or a navigation integration.
+      selector:
+        entity:
+          domain:
+            - sensor
+            - input_number
+    charge_time_needed_sensor:
+      name: EV Charge Time Needed Sensor
+      description: >-
+        This integration's own "EV Charge Time Needed" sensor for the
+        charger (hours to reach 100%, based on the current charging current
+        and the battery capacity you set in the integration's options).
+      selector:
+        entity:
+          domain: sensor
+    charger_switch:
+      name: EV Charger Switch
+      selector:
+        entity:
+          domain: switch
+    charger_amps:
+      name: EV Charger Amperage Control
+      selector:
+        entity:
+          domain: number
+    max_charging_amps:
+      name: Maximum Charging Current (A)
+      description: Used when forcing a full-speed charge because time is short.
+      default: 32
+      selector:
+        number:
+          min: 6
+          max: 48
+          unit_of_measurement: A
+    departure_time:
+      name: Planned Departure Time
+      description: The time of day you plan to leave.
+      selector:
+        time: {}
+    overhead_percent:
+      name: Range Safety Overhead (%)
+      description: >-
+        Extra buffer added on top of the trip distance to account for cold
+        weather, detours, and general range-estimate optimism. 30% is a
+        reasonable default for winter conditions.
+      default: 30
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+    buffer_hours:
+      name: Safety Margin Before Departure (hours)
+      description: >-
+        Start forcing a charge this many hours earlier than the bare minimum
+        needed, so an unexpected interruption doesn't leave the car short.
+      default: 1
+      selector:
+        number:
+          min: 0
+          max: 6
+          step: 0.5
+          unit_of_measurement: hours
+    check_interval_minutes:
+      name: Check Interval (minutes)
+      default: 30
+      selector:
+        number:
+          min: 5
+          max: 120
+          unit_of_measurement: minutes
+    notify_service:
+      name: Notification Service (optional)
+      description: Leave blank to disable notifications.
+      default: ""
+      selector:
+        text: {}
+
+mode: single
+trigger:
+  - platform: time_pattern
+    minutes: !input check_interval_minutes
+
+variables:
+  range_remaining_entity: !input range_remaining_sensor
+  trip_distance_entity: !input trip_distance_sensor
+  charge_time_needed_entity: !input charge_time_needed_sensor
+  range_remaining: "{{ states(range_remaining_entity) | float(0) }}"
+  trip_distance: "{{ states(trip_distance_entity) | float(0) }}"
+  overhead: !input overhead_percent
+  required_range: "{{ trip_distance * (1 + (overhead | float) / 100) }}"
+  needs_charge: "{{ required_range > range_remaining }}"
+  charge_hours_needed: "{{ states(charge_time_needed_entity) | float(0) }}"
+  buffer: !input buffer_hours
+  departure_time_input: !input departure_time
+  dep_today: "{{ today_at(departure_time_input) }}"
+  departure: "{{ dep_today if dep_today > now() else dep_today + timedelta(days=1) }}"
+  hours_until_departure: "{{ ((departure - now()).total_seconds() / 3600) | round(2) }}"
+  time_is_short: "{{ (hours_until_departure - (buffer | float)) < charge_hours_needed }}"
+  notify_target: !input notify_service
+
+condition:
+  - condition: template
+    value_template: "{{ needs_charge and time_is_short }}"
+
+action:
+  - action: number.set_value
+    target:
+      entity_id: !input charger_amps
+    data:
+      value: !input max_charging_amps
+  - action: switch.turn_on
+    target:
+      entity_id: !input charger_switch
+  - if:
+      - condition: template
+        value_template: "{{ notify_target | trim != '' }}"
+    then:
+      - action: "{{ notify_target }}"
+        data:
+          title: "EV Charging Now — Time is Short"
+          message: >-
+            Forcing a full-speed charge: {{ hours_until_departure }}h until
+            departure, ~{{ charge_hours_needed }}h needed to reach 100%.
+            Solar-excess charging alone wouldn't have finished in time.

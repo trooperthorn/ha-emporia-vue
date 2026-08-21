@@ -1,0 +1,85 @@
+blueprint:
+  name: "Energy: Circuit Left On Alert"
+  description: >-
+    Notifies you when a monitored circuit (or the "Balance" unmonitored-load
+    sensor) has been drawing power above a threshold for longer than
+    expected — the classic "did I leave the space heater/oven/pool pump on"
+    check. Works with any of this integration's per-channel "Power (1MIN)"
+    sensors, or any other power sensor.
+  domain: automation
+  input:
+    power_sensor:
+      name: Power Sensor
+      description: >-
+        A per-circuit "Power (1MIN)" sensor from this integration (or any
+        other watts sensor) to watch.
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+    power_threshold:
+      name: Power Threshold (W)
+      description: Alert if usage stays at or above this level.
+      default: 200
+      selector:
+        number:
+          min: 1
+          max: 20000
+          unit_of_measurement: W
+    duration:
+      name: Sustained Duration
+      description: How long it must stay above the threshold before alerting.
+      default:
+        hours: 3
+      selector:
+        duration: {}
+    notify_service:
+      name: Notification Service
+      selector:
+        text: {}
+    quiet_hours_start:
+      name: Quiet Hours Start (optional)
+      description: >-
+        Suppress notifications from this time until Quiet Hours End, in case
+        the circuit is expected to run overnight (e.g. a well pump). Leave
+        both blank to disable.
+      default: ""
+      selector:
+        text: {}
+    quiet_hours_end:
+      name: Quiet Hours End (optional)
+      default: ""
+      selector:
+        text: {}
+
+mode: single
+trigger:
+  - platform: numeric_state
+    entity_id: !input power_sensor
+    above: !input power_threshold
+    for: !input duration
+
+variables:
+  quiet_start: !input quiet_hours_start
+  quiet_end: !input quiet_hours_end
+  in_quiet_hours: >-
+    {% if quiet_start | trim == '' or quiet_end | trim == '' %}
+      false
+    {% else %}
+      {{ now().strftime('%H:%M') >= quiet_start and now().strftime('%H:%M') < quiet_end
+         if quiet_start < quiet_end else
+         (now().strftime('%H:%M') >= quiet_start or now().strftime('%H:%M') < quiet_end) }}
+    {% endif %}
+
+condition:
+  - condition: template
+    value_template: "{{ not in_quiet_hours }}"
+
+action:
+  - action: !input notify_service
+    data:
+      title: "Circuit Left On?"
+      message: >-
+        {{ trigger.to_state.attributes.friendly_name }} has been drawing
+        {{ trigger.to_state.state }}W for a while now — worth checking if
+        something was left running.
